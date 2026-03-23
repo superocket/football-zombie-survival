@@ -1,0 +1,4546 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Football Zombie Survival</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#000;
+  display:flex; justify-content:center; align-items:center;
+  height:100vh; overflow:hidden;
+  font-family:'Courier New',monospace;
+  touch-action:none;
+}
+canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges; }
+#overlay {
+  position:absolute; top:0; left:0; width:100%; height:100%;
+  display:flex; flex-direction:column; justify-content:center; align-items:center;
+  background:rgba(0,0,0,0.93); z-index:10;
+}
+#overlay h1 {
+  color:#e8ff00; font-size:24px; letter-spacing:3px;
+  text-transform:uppercase; text-align:center;
+  text-shadow:0 0 18px #e8ff00aa; margin-bottom:6px;
+}
+.sub { color:#ff4444; font-size:11px; letter-spacing:2px; margin-bottom:26px; }
+.score-display { color:#fff; font-size:13px; margin-bottom:18px; text-align:center; letter-spacing:1px; }
+#overlay button {
+  background:#e8ff00; border:none; color:#000;
+  font-size:14px; font-family:'Courier New',monospace; font-weight:bold;
+  letter-spacing:3px; padding:14px 44px; cursor:pointer; text-transform:uppercase;
+  clip-path:polygon(6px 0%,100% 0%,calc(100% - 6px) 100%,0% 100%);
+}
+.instructions {
+  color:#ffffff; font-size:14px; margin-top:18px;
+  text-align:center; line-height:2; letter-spacing:1px;
+}
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<div id="overlay">
+  <h1>&#x26BD; FOOTBALL<br>ZOMBIE SURVIVAL</h1>
+  <div class="sub">&#8212; HORDE EDITION &#8212;</div>
+  <div class="score-display" id="final-score" style="display:none"></div>
+  <button id="startBtn" onclick="startGame()">PLAY</button>
+  <div class="instructions">
+    HOLD finger &#8594; move your player<br>
+    Ball auto-shoots visible zombies<br>
+    More kills &#8594; bigger horde !
+  </div>
+</div>
+<script>
+// ══════════════════════════════════════
+// SETUP
+// ══════════════════════════════════════
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const VW = 390, VH = 844;
+canvas.width = VW; canvas.height = VH;
+const ZOOM = 2.4; // camera zoom factor
+
+// ── Detect mobile vs desktop ──
+const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+                 ('ontouchstart' in window && navigator.maxTouchPoints > 1);
+
+function resize(){
+  if(isMobile){
+    // Mobile: scale to fit screen preserving ratio
+    const s = Math.min(innerWidth/VW, innerHeight/VH);
+    canvas.style.width  = VW*s+'px';
+    canvas.style.height = VH*s+'px';
+    canvas.style.position = '';
+    canvas.style.left = '';
+    canvas.style.top  = '';
+  } else {
+    // Desktop: fill the entire viewport height, center horizontally
+    const s = Math.min(innerWidth/VW, innerHeight/VH);
+    canvas.style.width  = VW*s+'px';
+    canvas.style.height = VH*s+'px';
+  }
+}
+resize(); addEventListener('resize', resize);
+
+// ── Fullscreen button (desktop only) ──
+if(!isMobile){
+  const fsBtn = document.createElement('button');
+  fsBtn.id = 'fsBtn';
+  fsBtn.textContent = '⛶ FULLSCREEN';
+  fsBtn.style.cssText = `
+    position:fixed; bottom:12px; right:12px; z-index:100;
+    background:rgba(0,0,0,0.7); color:#e8ff00; border:1px solid #e8ff00;
+    font:bold 11px Courier New; letter-spacing:2px; padding:7px 14px;
+    cursor:pointer; text-transform:uppercase; outline:none;
+  `;
+  fsBtn.onclick = ()=>{
+    const el = document.documentElement;
+    if(!document.fullscreenElement){
+      el.requestFullscreen && el.requestFullscreen();
+      fsBtn.textContent = '✕ EXIT FULL';
+    } else {
+      document.exitFullscreen && document.exitFullscreen();
+      fsBtn.textContent = '⛶ FULLSCREEN';
+    }
+  };
+  document.addEventListener('fullscreenchange', ()=>{
+    if(!document.fullscreenElement) fsBtn.textContent = '⛶ FULLSCREEN';
+  });
+  document.body.appendChild(fsBtn);
+  // Auto-request fullscreen when game starts
+  document.getElementById('startBtn').addEventListener('click', ()=>{
+    const el = document.documentElement;
+    if(!document.fullscreenElement){
+      el.requestFullscreen && el.requestFullscreen().catch(()=>{});
+    }
+  }, {once:false});
+}
+
+// ── WORLD ──
+const WORLD = { w:1000, h:1800 };
+const PITCH = { x:40, y:60, w:WORLD.w-80, h:WORLD.h-120 };
+
+// ── CAMERA ──
+const cam = { x:0, y:0, shake:0 };
+function updateCamera(){
+  // cam stores the world position of screen center (= player position)
+  cam.x += (player.x - cam.x) * 0.12;
+  cam.y += (player.y - cam.y) * 0.12;
+}
+// World-to-screen with zoom (ZOOM=1.35 means 35% closer)
+// World-to-screen: player (cam.x/y) always maps to screen center (VW/2, VH/2)
+const sx = wx => (wx - cam.x) * ZOOM + VW/2 + (cam.shake>0?(Math.random()-0.5)*cam.shake:0);
+const sy = wy => (wy - cam.y) * ZOOM + VH/2 + (cam.shake>0?(Math.random()-0.5)*cam.shake:0);
+
+// ══════════════════════════════════════
+// AUDIO  (Web Audio API)
+// ══════════════════════════════════════
+let AC = null;
+function getAC(){
+  if(!AC) AC = new (window.AudioContext||window.webkitAudioContext)();
+  if(AC.state==='suspended') AC.resume();
+  return AC;
+}
+function tone(freq,type,dur,vol,fe){
+  try{
+    const ac=getAC(), o=ac.createOscillator(), g=ac.createGain();
+    o.connect(g); g.connect(ac.destination);
+    o.type=type; o.frequency.setValueAtTime(freq,ac.currentTime);
+    if(fe!=null) o.frequency.exponentialRampToValueAtTime(fe,ac.currentTime+dur);
+    g.gain.setValueAtTime(vol,ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+dur);
+    o.start(); o.stop(ac.currentTime+dur);
+  }catch(e){}
+}
+function noise(dur,vol,band){
+  try{
+    const ac=getAC(), len=Math.floor(ac.sampleRate*dur);
+    const buf=ac.createBuffer(1,len,ac.sampleRate), d=buf.getChannelData(0);
+    for(let i=0;i<len;i++) d[i]=(Math.random()*2-1);
+    const src=ac.createBufferSource(); src.buffer=buf;
+    const f=ac.createBiquadFilter(); f.type='bandpass'; f.frequency.value=band; f.Q.value=0.7;
+    const g=ac.createGain();
+    g.gain.setValueAtTime(vol,ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+dur);
+    src.connect(f); f.connect(g); g.connect(ac.destination);
+    src.start(); src.stop(ac.currentTime+dur);
+  }catch(e){}
+}
+let lastSfxTime = {};
+function throttleSfx(key, minMs, fn){
+  const now = Date.now();
+  if(!lastSfxTime[key] || now-lastSfxTime[key]>minMs){ lastSfxTime[key]=now; fn(); }
+}
+
+const SFX = {
+  kick(){  tone(190,'sine',0.13,0.55,55); noise(0.08,0.22,320); },
+  hit(){   tone(230,'square',0.08,0.3,180); noise(0.06,0.15,500); },
+  growl(){ throttleSfx('gr',120,()=>{ tone(80+Math.random()*55,'sawtooth',0.19,0.2,48); noise(0.15,0.08,180); }); },
+
+  // Short running grunt for fast/sprint zombies — replays every ~1s
+  runGrowl(){
+    throttleSfx('rg',80,()=>{
+      try{
+        const ac=getAC(), t0=ac.currentTime;
+        // Quick sharp exhale grunt: rising then cut
+        const o=ac.createOscillator(), g=ac.createGain();
+        o.type='sawtooth';
+        o.frequency.setValueAtTime(140+Math.random()*40, t0);
+        o.frequency.exponentialRampToValueAtTime(80, t0+0.06);
+        g.gain.setValueAtTime(0.28, t0);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0+0.08);
+        const flt=ac.createBiquadFilter();
+        flt.type='bandpass'; flt.frequency.value=300; flt.Q.value=1.2;
+        o.connect(flt); flt.connect(g); g.connect(ac.destination);
+        o.start(); o.stop(t0+0.09);
+        // Breathy noise underlayer
+        noise(0.06, 0.12, 250+Math.random()*100);
+      }catch(e){}
+    });
+  },
+
+  // Deep heavy groan when big/tank zombie takes a hit
+  bigHit(){
+    throttleSfx('bh',180,()=>{
+      try{
+        const ac=getAC(), t0=ac.currentTime;
+        // Very low guttural moan — descends slowly
+        const o=ac.createOscillator(), g=ac.createGain();
+        o.type='sawtooth';
+        o.frequency.setValueAtTime(65+Math.random()*20, t0);
+        o.frequency.exponentialRampToValueAtTime(30, t0+0.35);
+        g.gain.setValueAtTime(0.45, t0);
+        g.gain.linearRampToValueAtTime(0.3, t0+0.15);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0+0.38);
+        const flt=ac.createBiquadFilter();
+        flt.type='lowpass'; flt.frequency.value=320;
+        o.connect(flt); flt.connect(g); g.connect(ac.destination);
+        o.start(); o.stop(t0+0.4);
+        // Rumble noise
+        noise(0.25, 0.2, 90+Math.random()*40);
+        // Second harmonic layer
+        setTimeout(()=>{
+          const o2=ac.createOscillator(), g2=ac.createGain();
+          o2.type='sine';
+          o2.frequency.setValueAtTime(40, ac.currentTime);
+          o2.frequency.exponentialRampToValueAtTime(22, ac.currentTime+0.2);
+          g2.gain.setValueAtTime(0.3, ac.currentTime);
+          g2.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+0.22);
+          o2.connect(g2); g2.connect(ac.destination);
+          o2.start(); o2.stop(ac.currentTime+0.23);
+        }, 40);
+      }catch(e){}
+    });
+  },
+  explode(){ noise(0.38,0.6,650); tone(70,'sawtooth',0.28,0.4,35); setTimeout(()=>noise(0.2,0.28,200),80); },
+  playerScream(){
+    throttleSfx('ph',500,()=>{
+      try{
+        const ac=getAC(), t0=ac.currentTime;
+        // ── Impact grave (choc physique) ──
+        const oi=ac.createOscillator(), gi=ac.createGain();
+        oi.type='sine';
+        oi.frequency.setValueAtTime(110,t0);
+        oi.frequency.exponentialRampToValueAtTime(30,t0+0.18);
+        gi.gain.setValueAtTime(0.7,t0);
+        gi.gain.exponentialRampToValueAtTime(0.0001,t0+0.2);
+        oi.connect(gi); gi.connect(ac.destination);
+        oi.start(); oi.stop(t0+0.22);
+        // ── Bruit d'impact court ──
+        noise(0.06,0.5,600);
+        // ── Cri "AAH" : 3 formants vocaux superposés ──
+        // Formant F1 (poitrine ~700Hz)
+        const makeFormant=(fStart,fEnd,vol,dur,q,delay)=>{
+          setTimeout(()=>{
+            try{
+              const ac2=getAC(), t1=ac2.currentTime;
+              const ov=ac2.createOscillator(), gv=ac2.createGain();
+              const fv=ac2.createBiquadFilter();
+              ov.type='sawtooth';
+              ov.frequency.setValueAtTime(fStart,t1);
+              ov.frequency.linearRampToValueAtTime(fEnd,t1+dur*0.4);
+              ov.frequency.linearRampToValueAtTime(fStart*0.7,t1+dur);
+              fv.type='bandpass'; fv.frequency.value=fStart*3.2; fv.Q.value=q;
+              gv.gain.setValueAtTime(0,t1);
+              gv.gain.linearRampToValueAtTime(vol,t1+0.03);
+              gv.gain.setValueAtTime(vol*0.8,t1+dur*0.3);
+              gv.gain.exponentialRampToValueAtTime(0.0001,t1+dur);
+              ov.connect(fv); fv.connect(gv); gv.connect(ac2.destination);
+              ov.start(); ov.stop(t1+dur+0.05);
+            }catch(e){}
+          },delay);
+        };
+        // Départ du cri légèrement après l'impact
+        makeFormant(260, 380, 0.38, 0.55, 4,  60);  // voix principale
+        makeFormant(260, 380, 0.22, 0.50, 8,  65);  // harmonique
+        makeFormant(200, 310, 0.15, 0.45, 2, 120);  // souffle résiduel
+        // ── Vibrato de détresse (tremblements) ──
+        setTimeout(()=>{
+          try{
+            const ac3=getAC(), t2=ac3.currentTime;
+            const ot=ac3.createOscillator(), vib=ac3.createOscillator();
+            const gvib=ac3.createGain(), gout=ac3.createGain();
+            ot.type='sawtooth'; ot.frequency.value=270;
+            vib.type='sine'; vib.frequency.value=8; // 8Hz tremolo
+            vib.connect(gvib); gvib.gain.value=18;  // ±18Hz wobble
+            gvib.connect(ot.frequency);
+            const fvib=ac3.createBiquadFilter(); fvib.type='bandpass'; fvib.frequency.value=1100; fvib.Q.value=5;
+            gout.gain.setValueAtTime(0.2,t2);
+            gout.gain.exponentialRampToValueAtTime(0.0001,t2+0.35);
+            ot.connect(fvib); fvib.connect(gout); gout.connect(ac3.destination);
+            vib.start(); ot.start(); vib.stop(t2+0.37); ot.stop(t2+0.37);
+          }catch(e){}
+        },100);
+      }catch(e){}
+      // Vibration écran forte sur hit joueur
+      cam.shake=16;
+      cam.shakeDecay=0.82;
+    });
+  },
+  fastZombie(){ throttleSfx('fz',300,()=>{ tone(320,'sawtooth',0.1,0.18,600); }); },
+  killShake(isSprinter){
+    // Vibration légère sur kill — moins forte que hit joueur
+    cam.shake = isSprinter ? 6 : 2.5;
+    cam.shakeDecay = 0.75;
+  },
+  waveUp(){ [300,400,520].forEach((f,i)=>setTimeout(()=>tone(f,'square',0.12,0.2),i*80)); },
+
+  // Soft earth-breaking sound when zombie digs out
+  zombieEmerge(){
+    throttleSfx('ze',300,()=>{
+      try{
+        const ac=getAC(), t0=ac.currentTime;
+        // Low rumble — earth shifting
+        noise(0.35, 0.08, 60+Math.random()*30);
+        // Muffled thud — dirt breaking
+        setTimeout(()=>noise(0.2, 0.06, 120+Math.random()*40), 80);
+        // Faint creak — surface crack
+        const o=ac.createOscillator(), g=ac.createGain();
+        o.type='sawtooth';
+        o.frequency.setValueAtTime(35+Math.random()*15, t0);
+        o.frequency.exponentialRampToValueAtTime(18, t0+0.3);
+        g.gain.setValueAtTime(0.07, t0);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0+0.32);
+        o.connect(g); g.connect(ac.destination);
+        o.start(); o.stop(t0+0.33);
+      }catch(e){}
+    });
+  },
+  chunkLand(){
+    throttleSfx('cl',60,()=>{
+      // Organic wet thud: low thump + wet splat noise
+      try{
+        const ac=getAC();
+        // Low thump
+        const o=ac.createOscillator(), g=ac.createGain();
+        o.type='sine';
+        o.frequency.setValueAtTime(55+Math.random()*25, ac.currentTime);
+        o.frequency.exponentialRampToValueAtTime(20, ac.currentTime+0.12);
+        g.gain.setValueAtTime(0.175, ac.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+0.14);
+        o.connect(g); g.connect(ac.destination);
+        o.start(); o.stop(ac.currentTime+0.15);
+        // Wet splat: short noise burst low-mid freq
+        noise(0.07, 0.09, 180+Math.random()*120);
+        // Second organic layer: body-like mid thud
+        setTimeout(()=>noise(0.05,0.05,80+Math.random()*60), 20);
+      }catch(e){}
+    });
+  },
+  powerupPickup(){ [500,700,900].forEach((f,i)=>setTimeout(()=>tone(f,'sine',0.1,0.22),i*55)); },
+  bombExplode(){ noise(0.55,0.9,400); tone(60,'sawtooth',0.45,0.7,25); setTimeout(()=>noise(0.3,0.4,200),100); },
+  thunderStrike(){
+    try{
+      const ac=getAC(), t0=ac.currentTime;
+      // Electric crack — sharp high freq burst
+      const oc=ac.createOscillator(), gc=ac.createGain(), fc=ac.createBiquadFilter();
+      oc.type='sawtooth'; oc.frequency.setValueAtTime(1800,t0); oc.frequency.exponentialRampToValueAtTime(120,t0+0.12);
+      fc.type='bandpass'; fc.frequency.value=2200; fc.Q.value=0.8;
+      gc.gain.setValueAtTime(0.7,t0); gc.gain.exponentialRampToValueAtTime(0.0001,t0+0.14);
+      oc.connect(fc); fc.connect(gc); gc.connect(ac.destination);
+      oc.start(); oc.stop(t0+0.15);
+      // White noise crackle
+      noise(0.08,0.9,3000); noise(0.06,0.5,1500);
+      // Deep thunder rumble after 80ms
+      setTimeout(()=>{
+        try{
+          const ac2=getAC(), t1=ac2.currentTime;
+          const or=ac2.createOscillator(), gr=ac2.createGain(), fr=ac2.createBiquadFilter();
+          or.type='sawtooth'; or.frequency.setValueAtTime(55,t1); or.frequency.exponentialRampToValueAtTime(18,t1+0.6);
+          fr.type='lowpass'; fr.frequency.value=200;
+          gr.gain.setValueAtTime(0.65,t1); gr.gain.exponentialRampToValueAtTime(0.0001,t1+0.65);
+          or.connect(fr); fr.connect(gr); gr.connect(ac2.destination);
+          or.start(); or.stop(t1+0.7);
+          noise(0.5,0.4,80);
+        }catch(e){}
+      },80);
+    }catch(e){}
+  },
+  shotgunFire(){
+    try{
+      const ac=getAC(),t0=ac.currentTime;
+      // Deep BOOM
+      const o=ac.createOscillator(),g=ac.createGain();
+      o.type='sawtooth'; o.frequency.setValueAtTime(180,t0); o.frequency.exponentialRampToValueAtTime(30,t0+0.18);
+      g.gain.setValueAtTime(0.9,t0); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.22);
+      const f=ac.createBiquadFilter(); f.type='lowpass'; f.frequency.value=800;
+      o.connect(f);f.connect(g);g.connect(ac.destination); o.start();o.stop(t0+0.23);
+      noise(0.18,0.95,1400); noise(0.12,0.6,400);
+    }catch(e){}
+  },
+  shotgunReload(){
+    try{
+      const ac=getAC(),t0=ac.currentTime;
+      // Pump slide — two metallic clunks
+      tone(320,'square',0.06,0.4,420); // slide out
+      setTimeout(()=>{ tone(280,'square',0.07,0.5,180); noise(0.05,0.3,900); },140); // click lock
+      setTimeout(()=>{ tone(180,'sine',0.05,0.3,90); },220); // chamber close
+    }catch(e){}
+  },
+};
+
+// ══════════════════════════════════════
+// PALETTE
+// ══════════════════════════════════════
+const C = {
+  grass1:'#1a5c1a', grass2:'#1d6b1d', line:'rgba(255,255,255,0.45)',
+  player:'#e8ff00', playerD:'#b8cc00',
+  blood:'#c62828',
+};
+
+// ══════════════════════════════════════
+// BIOME SYSTEM
+// ══════════════════════════════════════
+// biome: 0=grass, 1=desert(10k), 2=snow(20k), 3=graveyard(30k)
+let biome = 0;
+let biomeTransition = 0;  // 0→1 over 180 frames (3s)
+let biomePrev = 0;        // previous biome for colour lerp
+let snowflakes = [];      // active snowflakes
+let biomeObstacles = [];  // trees or graves: {x,y,w,h,type}
+
+// Colour palettes per biome
+const BIOMES = [
+  { g1:'#1a5c1a', g2:'#1d6b1d', line:'rgba(255,255,255,0.45)', stand:'#111111', filter:null },
+  { g1:'#c8a96e', g2:'#b89558', line:'rgba(200,180,140,0.55)', stand:'#1a1206', filter:'rgba(200,160,80,0.13)' },
+  { g1:'#c8d8e8', g2:'#b8c8da', line:'rgba(200,220,255,0.6)',  stand:'#0a1220', filter:'rgba(180,210,255,0.12)' },
+  { g1:'#3a3a3a', g2:'#2e2e2e', line:'rgba(160,160,180,0.5)', stand:'#080808', filter:'rgba(20,10,30,0.18)'   },
+];
+
+function lerpColor(c1, c2, t){
+  // Parse hex or rgba strings → lerp → return hex
+  const p = s => {
+    const m = s.match(/[\da-f]{2}/gi);
+    if(m && m.length>=3) return m.slice(0,3).map(x=>parseInt(x,16));
+    const r2 = s.match(/[\d.]+/g);
+    if(r2) return [+r2[0],+r2[1],+r2[2]];
+    return [0,0,0];
+  };
+  const a=p(c1), b=p(c2);
+  const r=Math.round(a[0]+(b[0]-a[0])*t);
+  const g2=Math.round(a[1]+(b[1]-a[1])*t);
+  const bl=Math.round(a[2]+(b[2]-a[2])*t);
+  return `rgb(${r},${g2},${bl})`;
+}
+
+function getCurrentBiomeColors(){
+  const t = biomeTransition;
+  const A = BIOMES[biomePrev], B = BIOMES[biome];
+  return {
+    g1:   t>=1 ? B.g1   : lerpColor(A.g1,   B.g1,   t),
+    g2:   t>=1 ? B.g2   : lerpColor(A.g2,   B.g2,   t),
+    line: t>=1 ? B.line : B.line,  // just swap at end
+    stand:t>=1 ? B.stand: lerpColor(A.stand, B.stand, t),
+    filter: B.filter,
+    filterAlpha: t,
+  };
+}
+
+function spawnBiomeObstacles(){
+  biomeObstacles = [];
+  if(biome===0) return;
+  const count = biome===1 ? 16 : biome===2 ? 0 : 20; // trees/graves — ×2
+  const margin = 80;
+  let attempts=0;
+  while(biomeObstacles.length<count && attempts<400){
+    attempts++;
+    const ox = PITCH.x+margin + Math.random()*(PITCH.w-margin*2);
+    const oy = PITCH.y+margin + Math.random()*(PITCH.h-margin*2);
+    // Not too close to center (keep gameplay area open)
+    if(Math.hypot(ox-(PITCH.x+PITCH.w/2), oy-(PITCH.y+PITCH.h/2))<120) continue;
+    // Not too close to other obstacles
+    if(biomeObstacles.some(o=>Math.hypot(o.x-ox,o.y-oy)<90)) continue;
+    // Not too close to player spawn
+    if(Math.hypot(ox-player.x, oy-player.y)<100) continue;
+    const isGrave = biome===3;
+    biomeObstacles.push({
+      x:ox, y:oy,
+      w: isGrave?18:20, h: isGrave?24:32,
+      type: isGrave?'grave':'tree',
+      emergeFrame: frameCount + Math.floor(Math.random()*120), // stagger emergence
+      emerged: 0, // 0→1
+    });
+  }
+}
+
+function updateBiome(){
+  // Check score thresholds
+  const newBiome = score>=30000?3 : score>=20000?2 : score>=10000?1 : 0;
+  if(newBiome !== biome && biomeTransition>=1){
+    biomePrev = biome;
+    biome = newBiome;
+    biomeTransition = 0;
+    // Spawn obstacles for new biome
+    spawnBiomeObstacles();
+    // Init snowflakes for snow biome
+    if(biome===2){
+      snowflakes = [];
+      for(let i=0;i<40;i++) snowflakes.push({
+        x: Math.random()*VW, y: Math.random()*VH,
+        spd: 0.4+Math.random()*0.8, sz: 1+Math.random()*2,
+        drift: (Math.random()-0.5)*0.3, life:1,
+      });
+    }
+  }
+  if(biomeTransition<1) biomeTransition = Math.min(1, biomeTransition+1/180);
+
+  // Emerge obstacles
+  for(const o of biomeObstacles){
+    if(frameCount>=o.emergeFrame && o.emerged<1) o.emerged=Math.min(1, o.emerged+0.03);
+  }
+
+  // Snow update
+  if(biome===2 || (biomePrev===2 && biomeTransition<1)){
+    for(const s of snowflakes){
+      s.y += s.spd; s.x += s.drift;
+      if(s.y>VH){ s.y=0; s.x=Math.random()*VW; }
+      if(s.x<0) s.x=VW; if(s.x>VW) s.x=0;
+    }
+  }
+}
+
+function checkObstacleCollision(entity, hw, hh){
+  // Push entity out of all obstacles. entity must have .x .y
+  for(const o of biomeObstacles){
+    if(o.emerged<0.5) continue; // not fully emerged yet
+    const ow=o.w*0.5, oh=o.h*0.4; // collision half-sizes (tighter than visual)
+    const dx=entity.x-o.x, dy=entity.y-o.y;
+    const overX=hw+ow-Math.abs(dx), overY=hh+oh-Math.abs(dy);
+    if(overX>0 && overY>0){
+      // Push out on smallest axis
+      if(overX<overY){ entity.x+=dx>0?overX:-overX; }
+      else           { entity.y+=dy>0?overY:-overY; }
+    }
+  }
+}
+
+function drawBiomeObstacles(){
+  for(const o of biomeObstacles){
+    if(o.emerged<=0) continue;
+    const ox=Math.round(sx(o.x)), oy=Math.round(sy(o.y));
+    const scl=o.emerged;
+    ctx.save();
+    ctx.translate(ox, oy);
+    ctx.scale(scl, scl);
+    if(o.type==='tree') drawDeadTree();
+    else drawGrave();
+    ctx.restore();
+  }
+}
+
+function drawDeadTree(){
+  // Dead tree: dark brown trunk + bare branches
+  // Trunk
+  ctx.fillStyle='#3b2208';
+  ctx.fillRect(-5,-30,10,38);
+  // Bark texture lines
+  ctx.fillStyle='#2a1804';
+  ctx.fillRect(-3,-28,2,32); ctx.fillRect(2,-24,2,28);
+  // Main branches
+  ctx.strokeStyle='#3b2208'; ctx.lineWidth=4; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(0,-20); ctx.lineTo(-22,-38); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,-18); ctx.lineTo(20,-34); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,-10); ctx.lineTo(-14,-22); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,-12); ctx.lineTo(14,-20); ctx.stroke();
+  // Twigs
+  ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(-22,-38); ctx.lineTo(-28,-44); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-22,-38); ctx.lineTo(-16,-46); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(20,-34);  ctx.lineTo(26,-40); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(20,-34);  ctx.lineTo(14,-42); ctx.stroke();
+  // Root shadow
+  ctx.fillStyle='rgba(0,0,0,0.25)';
+  ctx.beginPath(); ctx.ellipse(0,8,12,4,0,0,Math.PI*2); ctx.fill();
+}
+
+function drawGrave(){
+  // Stone grave cross
+  // Base stone
+  ctx.fillStyle='#555566';
+  ctx.fillRect(-10,0,20,16);
+  // Stone shading
+  ctx.fillStyle='#44445a';
+  ctx.fillRect(-10,0,3,16); ctx.fillRect(-10,0,20,3);
+  ctx.fillStyle='#666677';
+  ctx.fillRect(7,2,3,14);
+  // Cross vertical
+  ctx.fillStyle='#6a6a7a';
+  ctx.fillRect(-4,-28,8,32);
+  // Cross horizontal
+  ctx.fillRect(-14,-20,28,8);
+  // Stone texture/moss
+  ctx.fillStyle='rgba(80,120,60,0.35)';
+  ctx.fillRect(-8,4,5,8); ctx.fillRect(3,8,4,6);
+  // Crack
+  ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(-2,-10); ctx.lineTo(1,-2); ctx.lineTo(-1,6); ctx.stroke();
+  // Shadow
+  ctx.fillStyle='rgba(0,0,0,0.3)';
+  ctx.beginPath(); ctx.ellipse(0,18,14,5,0,0,Math.PI*2); ctx.fill();
+}
+
+function drawBiomeFilter(){
+  const bc = getCurrentBiomeColors();
+  if(!bc.filter || bc.filterAlpha<=0) return;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, bc.filterAlpha) * 0.85;
+  ctx.fillStyle = bc.filter;
+  ctx.fillRect(0,0,VW,VH);
+  ctx.restore();
+}
+
+function drawSnowflakes(){
+  if(biome!==2) return;
+  const alpha = Math.min(1, biomeTransition);
+  ctx.save();
+  ctx.globalAlpha = alpha * 0.75;
+  ctx.fillStyle = '#ddeeff';
+  for(const s of snowflakes){
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.sz, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ══════════════════════════════════════
+// ZOMBIE TYPES  (5 types)
+// ══════════════════════════════════════
+// speedMult = random factor applied at spawn for natural variation
+// Clothing variants per zombie type
+// shirt: array of possible shirt colors | pants: array of possible pants colors
+// skin: green variants per type (darker=tougher, brighter=faster)
+const ZTYPES = [
+  // 0: Normal — medium grey skin, speed scales with kills (5 phases)
+  { id:'normal', maxHp:1, spd:0.25, spdVar:0.08, w:14,h:20,
+    skins:['#9e9e9e','#8d8d8d','#b0b0b0'],
+    shirts:['#c62828','#ad1457','#6a1b9a','#1565c0','#2e7d32','#e65100'],
+    pants:['#1565c0','#0d47a1','#1a237e','#263238','#37474f'],
+    pts:10, scale:1, label:'' },
+  // 1: Big — dark grey skin, slow, 2hp
+  { id:'big',    maxHp:2, spd:0.16, spdVar:0.04, w:20,h:28,
+    skins:['#757575','#616161','#686868'],
+    shirts:['#b71c1c','#880e4f','#4a148c','#bf360c','#33691e'],
+    pants:['#0d47a1','#1a237e','#212121','#1b0000'],
+    pts:25, scale:1.5, label:'' },
+  // 2: Tank — near-black, very slow, 3hp
+  { id:'tank',   maxHp:3, spd:0.12, spdVar:0.03, w:24,h:32,
+    skins:['#424242','#4a4a4a','#3a3a3a'],
+    shirts:['#4a148c','#880e4f','#b71c1c','#212121'],
+    pants:['#212121','#1a237e','#37474f'],
+    pts:50, scale:1.8, label:'' },
+  // 3: Fast — single fast type, fixed speed (never scales)
+  { id:'fast',   maxHp:1, spd:0.85, spdVar:0.18, w:11,h:16,
+    skins:['#e0e0e0','#cfcfcf','#bdbdbd'],
+    shirts:['#ffeb3b','#fff176','#f9a825','#ff8f00'],
+    pants:['#1565c0','#0288d1','#006064'],
+    pts:30, scale:0.9, label:'⚡' },
+];
+
+// ══════════════════════════════════════
+// STATE
+// ══════════════════════════════════════
+let player, ball, zombies, particles;
+let score, wave, totalKills, frameCount, shootCooldown;
+let killsByType = {normal:0, big:0, tank:0, fast:0};
+let gameOver, waveAnnounce, loopId;
+// Fixed timestep: logic always runs at 60fps regardless of display refresh rate
+const FIXED_DT = 1000 / 60; // 16.667ms per logic tick
+let accumulator = 0;
+let lastTimestamp = 0;
+let spawnTimer = 0;   // continuous spawner
+let targetCount = 0;  // desired zombie population on screen
+let zombieSpeedMult = 1; // persists across wave-5 purges
+
+// ══════════════════════════════════════
+// POWER-UP SYSTEM
+// ══════════════════════════════════════
+let powerups = [];
+let powerupSpawnTimer = 0;
+// Timer for the random extra powerup that appears every ~5s (±1s variance)
+let powerupExtraTimer = 0;
+let powerupExtraInterval = 0; // randomised each time
+let powerupsUnlocked = false; // becomes true at wave 2
+
+// Active effects
+const fx = {
+  fireBall:   { active:false, timer:0, max:600 },   // 10s
+  // ricochet: permanent stacking — count = nb of bounces (0=off, max 5)
+  thunder:    { active:false, timer:0, max:600, nextStrike:0 }, // 10s
+  slowMo:     { active:false, timer:0, max:600 },   // 10s (was 4s)
+  shotgun:    { active:false, timer:0, max:600, reloading:0, shots:3, aimX:1, aimY:0, muzzleFlash:0 }, // 10s
+};
+// Mega Dash powerup state
+const megaDash = {
+  active: false,
+  timer: 0,
+  max: 600,          // 10s at 60fps
+  ready: false,
+  lowHpBtn: false,
+  lowHpUsed: false,
+  vx: 0, vy: 0,     // locked direction for current hop
+  pendingVx: 0, pendingVy: 0, // direction chosen during pause, applied next hop
+  // Hop/pause state machine
+  // phase: 'pause' | 'hop'
+  phase: 'pause',
+  phaseTimer: 0,
+  HOP_DUR: 14,       // frames for a single hop burst (~0.23s)
+  PAUSE_DUR: 30,     // frames for pause between hops (~0.5s)
+  // Laser trail: array of {x1,y1,x2,y2, life, maxLife}
+  lasers: [],
+  hopStartX: 0, hopStartY: 0, // start pos of current hop (for laser)
+};
+// Button zone for low-hp mega button — BIGGER
+const MEGA_BTN = { x: VW/2-90, y: VH-130, w: 180, h: 68 };
+// Ricochet: permanent, stacks up to 5
+let ricochetCount = 0; // 0 = off, 1-5 = number of bounces
+let ricochetTimer = 0; // frames remaining (1800 = 30s)
+// Extra balls: stacks — positions: [right, left, above, below]
+let extraBalls = []; // array of ball objects, max 3 extra (total 4)
+// Orbit balls: 6 balls orbiting the player (x6balls powerup)
+let orbitBalls = []; // array of orbit ball objects
+const ORBIT_R = 38;  // orbit radius in world units
+let orbitBallsTimer = 0; // frames remaining (1200 = 20s)
+// Samurai sword powerup state
+const samurai = {
+  active: false,
+  timer: 0,
+  max: 600,          // 10s
+  swingAngle: 0,     // current sword angle
+  swingDir: 1,       // swing direction +1/-1
+  swingSpeed: 0.44,  // ×2 faster slashing
+  hitCooldown: 0,
+  ghosts: [],
+  ghostTimer: 0,
+};
+// thunderbolt entities
+let thunderbolts = [];
+// fire trails on ground left by fireball
+let fireTrails = [];
+// pause state
+let isPaused = false;
+let invincibleMode = false;
+// wave break: 2s spawn freeze when a new wave starts
+let waveBreakTimer = 0; // counts down from 120 (2s)
+// One Up system
+let oneUpCount = 0;         // current 1UP lives
+let oneUpScoreThreshold = 10000; // next score milestone for 1UP
+let oneUpAnim = 0;          // frames for the 1UP earn animation
+// One Up activation state machine
+// phases: 0=idle, 1=blackout(60f), 2=whiteflash(40f), 3=shockwave(50f)
+const oneUpFX = { phase:0, timer:0, shockR:0 };
+
+// ══════════════════════════════════════
+// INIT
+// ══════════════════════════════════════
+function startGame(){
+  getAC();
+  document.getElementById('overlay').style.display='none';
+  document.getElementById('final-score').style.display='none';
+  if(loopId) cancelAnimationFrame(loopId);
+  initGame();
+  accumulator = 0;
+  lastTimestamp = 0;
+  loopId = requestAnimationFrame(loop);
+}
+
+function initGame(){
+  score=0; wave=1; totalKills=0; frameCount=0;
+  killsByType={normal:0,big:0,tank:0,fast:0};
+  gameOver=false; shootCooldown=60; waveAnnounce=180;
+  particles=[]; zombies=[];
+  targetCount = 8; // start small
+  spawnTimer = 0;
+  zombieSpeedMult = 1;
+  // Reset powerups
+  powerups=[]; powerupSpawnTimer=0; thunderbolts=[]; extraBalls=[]; fireTrails=[]; orbitBalls=[]; orbitBallsTimer=0;
+  samurai.active=false; samurai.timer=0; samurai.swingAngle=0; samurai.swingDir=1;
+  samurai.hitCooldown=0; samurai.ghosts=[]; samurai.ghostTimer=0;
+  powerupExtraTimer=0; powerupExtraInterval=0; powerupsUnlocked=false;
+  ricochetCount=0; ricochetTimer=0; isPaused=false; waveBreakTimer=0;
+  megaDash.active=false; megaDash.timer=0; megaDash.ready=false;
+  megaDash.lowHpBtn=false; megaDash.lowHpUsed=false;
+  megaDash.vx=0; megaDash.vy=0; megaDash.pendingVx=0; megaDash.pendingVy=0;
+  megaDash.phase='pause'; megaDash.phaseTimer=0; megaDash.lasers=[]; megaDash.hopStartX=0; megaDash.hopStartY=0;
+  oneUpCount=0; oneUpScoreThreshold=10000; oneUpAnim=0; oneUpFX.phase=0; oneUpFX.timer=0; oneUpFX.shockR=0;
+  biome=0; biomePrev=0; biomeTransition=1; snowflakes=[]; biomeObstacles=[];
+  for(const k in fx){ fx[k].active=false; fx[k].timer=0; if(k==='thunder') fx[k].nextStrike=0; if(k==='shotgun'){fx[k].reloading=0;fx[k].shots=3;} }
+
+  player = {
+    x: PITCH.x+PITCH.w/2, y: PITCH.y+PITCH.h/2,
+    hp:100, maxHp:100,
+    w:14, h:20,
+    knockX:0, knockY:0,
+    animFrame:0, dir:1, hitFlash:0, kickAnim:0,
+    stunned:0,       // frames remaining stunned (ball locked, no shoot)
+    hitDirX:0, hitDirY:0, // direction of incoming hit for knockback
+  };
+  ball = {
+    x:player.x, y:player.y+12,
+    vx:0, vy:0, active:false, returning:false, r:7, spin:0,
+    footSpin:0,   // always spinning at feet
+    bounce:0,     // bounce phase for foot dribble
+    z:0,          // arc height (0=ground, positive=in air)
+    zv:0,         // vertical arc velocity
+  };
+
+  // First wave: fewer zombies to start
+  for(let i=0;i<6;i++) spawnZombie(true);   // 6 from edges (was 20)
+  // 2 dig-spawn zombies right away
+  setTimeout(()=>{ for(let i=0;i<2;i++) spawnZombie(false); }, 300);
+  updateCamera();
+}
+
+// ══════════════════════════════════════
+// SPAWNING
+// ══════════════════════════════════════
+function zombieTypeForWave(){
+  const r = Math.random();
+  if(wave >= 2 && r < 0.18) return 3; // fast (single fast type)
+  if(wave >= 4 && r < 0.10) return 2; // tank
+  if(wave >= 2 && r < 0.26) return 1; // big
+  return 0; // normal
+}
+
+// Track how many dig-spawn zombies are currently emerging on screen
+function countEmerging(){ return zombies.filter(z=>!z.dead&&z.emerging>0).length; }
+
+function spawnZombie(immediate){
+  const margin = 35;
+  let wx2, wy2;
+  let isDigSpawn = false;
+
+  if(immediate){
+    // Edge spawn (off-screen)
+    const side = Math.floor(Math.random()*4);
+    const offMin = (VW/ZOOM)*0.55, offMax = (VW/ZOOM)*1.5;
+    const offX = offMin + Math.random()*(offMax-offMin);
+    const offY = (VH/ZOOM)*0.55 + Math.random()*((VH/ZOOM)*0.8);
+    if(side===0)      { wx2=player.x+(Math.random()-0.5)*PITCH.w*0.9; wy2=player.y-offY; }
+    else if(side===1) { wx2=player.x+offX; wy2=player.y+(Math.random()-0.5)*PITCH.h*0.9; }
+    else if(side===2) { wx2=player.x+(Math.random()-0.5)*PITCH.w*0.9; wy2=player.y+offY; }
+    else              { wx2=player.x-offX; wy2=player.y+(Math.random()-0.5)*PITCH.h*0.9; }
+  } else {
+    // Dig spawn: random pitch position, not too close to player
+    // Max 4-5 dig zombies on screen at once
+    if(countEmerging() >= 4){
+      // Fallback to edge spawn if too many already digging
+      const side = Math.floor(Math.random()*4);
+      const offMin = (VW/ZOOM)*0.6, offMax = (VW/ZOOM)*1.5;
+      const offX = offMin + Math.random()*(offMax-offMin);
+      const offY = (VH/ZOOM)*0.6 + Math.random()*((VH/ZOOM)*0.8);
+      if(side===0)      { wx2=player.x+(Math.random()-0.5)*PITCH.w*0.9; wy2=player.y-offY; }
+      else if(side===1) { wx2=player.x+offX; wy2=player.y+(Math.random()-0.5)*PITCH.h*0.9; }
+      else if(side===2) { wx2=player.x+(Math.random()-0.5)*PITCH.w*0.9; wy2=player.y+offY; }
+      else              { wx2=player.x-offX; wy2=player.y+(Math.random()-0.5)*PITCH.h*0.9; }
+    } else {
+      // Dig out of ground on pitch — can spawn near player for drama
+      const minDist = 80, maxDist = (VW/ZOOM)*0.85;
+      let attempts=0;
+      do {
+        const angle = Math.random()*Math.PI*2;
+        const dist = minDist + Math.random()*(maxDist-minDist);
+        wx2 = player.x + Math.cos(angle)*dist;
+        wy2 = player.y + Math.sin(angle)*dist;
+        attempts++;
+      } while(attempts<15 && (wx2<PITCH.x+margin||wx2>PITCH.x+PITCH.w-margin||wy2<PITCH.y+margin||wy2>PITCH.y+PITCH.h-margin));
+      isDigSpawn = true;
+    }
+  }
+
+  wx2 = Math.max(PITCH.x+margin, Math.min(PITCH.x+PITCH.w-margin, wx2));
+  wy2 = Math.max(PITCH.y+margin, Math.min(PITCH.y+PITCH.h-margin, wy2));
+
+  const ti = zombieTypeForWave();
+  const tmpl = ZTYPES[ti];
+  const spdActual = tmpl.spd + (Math.random()-0.5)*tmpl.spdVar*2;
+  // Pick random skin/clothing variants
+  const zSkin   = tmpl.skins[Math.floor(Math.random()*tmpl.skins.length)];
+  const zShirt  = tmpl.shirts[Math.floor(Math.random()*tmpl.shirts.length)];
+  const zPants  = tmpl.pants[Math.floor(Math.random()*tmpl.pants.length)];
+  // Direction: face toward player initially
+  const initDir = (player.x > wx2) ? 1 : -1;
+
+  zombies.push({
+    ...tmpl,
+    x:wx2, y:wy2,
+    hp:tmpl.maxHp,
+    spd: Math.max(0.1, spdActual),
+    // Speed variant: 30% of zombies are "slow" (0.55–0.75×), rest are normal-to-fast (0.85–1.15×)
+    speedVariant: Math.random()<0.30 ? 0.55+Math.random()*0.20 : 0.85+Math.random()*0.30,
+    vx:0, vy:0,
+    knockX:0, knockY:0,
+    dead:false, deadAnim:0,
+    animFrame:0, hitFlash:0,
+    nextGrowl: frameCount + Math.floor(Math.random()*300+80),
+    blinkPhase: Math.random()*Math.PI*2,
+    skin: zSkin, shirt: zShirt, pants: zPants,
+    dir: initDir,
+    emerging: isDigSpawn ? 180 : 0, // 180 frames (3s) slow dig-out animation
+    emergeY: wy2,                   // ground level
+  });
+  // Spawn dirt particles at dig location
+  if(isDigSpawn){ spawnDirt(wx2, wy2); SFX.zombieEmerge(); }
+}
+
+// ══════════════════════════════════════
+// INPUT
+// ══════════════════════════════════════
+let joystickActive=false, joystickBase={x:0,y:0}, joystickDelta={x:0,y:0};
+
+canvas.addEventListener('touchstart', e=>{
+  e.preventDefault(); getAC();
+  const t=e.touches[0], r=canvas.getBoundingClientRect();
+  const scX=VW/r.width, scY=VH/r.height;
+  const tx=(t.clientX-r.left)*scX, ty=(t.clientY-r.top)*scY;
+  // Pause button zone: bottom-right 48×48
+  if(!gameOver && tx>VW-48 && ty>VH-48){ isPaused=!isPaused; return; }
+  // Invincible mode checkbox (only when paused)
+  if(isPaused){ updateInvincCbY(); if(tx>=INVINC_CB.x && tx<=INVINC_CB.x+INVINC_CB.w && ty>=INVINC_CB.y && ty<=INVINC_CB.y+INVINC_CB.h){ invincibleMode=!invincibleMode; return; } }
+  // Mega Power button zone (low hp emergency)
+  if(!gameOver && !megaDash.active && megaDash.lowHpBtn &&
+     tx>=MEGA_BTN.x && tx<=MEGA_BTN.x+MEGA_BTN.w &&
+     ty>=MEGA_BTN.y && ty<=MEGA_BTN.y+MEGA_BTN.h){
+    startMegaDash(); return;
+  }
+  joystickBase={x:tx,y:ty}; joystickDelta={x:0,y:0}; joystickActive=true;
+},{passive:false});
+
+canvas.addEventListener('click', e=>{
+  const r=canvas.getBoundingClientRect();
+  const scX=VW/r.width, scY=VH/r.height;
+  const tx=(e.clientX-r.left)*scX, ty=(e.clientY-r.top)*scY;
+  if(!gameOver && tx>VW-48 && ty>VH-48){ isPaused=!isPaused; return; }
+  if(isPaused){ updateInvincCbY(); if(tx>=INVINC_CB.x && tx<=INVINC_CB.x+INVINC_CB.w && ty>=INVINC_CB.y && ty<=INVINC_CB.y+INVINC_CB.h){ invincibleMode=!invincibleMode; return; } }
+});
+
+canvas.addEventListener('touchmove', e=>{
+  e.preventDefault();
+  if(!joystickActive)return;
+  const t=e.touches[0], r=canvas.getBoundingClientRect();
+  const scX=VW/r.width, scY=VH/r.height;
+  const dx=(t.clientX-r.left)*scX-joystickBase.x;
+  const dy=(t.clientY-r.top)*scY-joystickBase.y;
+  const d=Math.sqrt(dx*dx+dy*dy), maxR=55;
+  joystickDelta.x = d>maxR?(dx/d)*maxR:dx;
+  joystickDelta.y = d>maxR?(dy/d)*maxR:dy;
+},{passive:false});
+
+canvas.addEventListener('touchend', e=>{
+  e.preventDefault(); joystickActive=false; joystickDelta={x:0,y:0};
+},{passive:false});
+
+const keys={};
+addEventListener('keydown',e=>{
+  keys[e.key]=true;
+  if((e.key==='Escape'||e.key==='p')&&!gameOver) isPaused=!isPaused;
+  if(e.key==='m'&&!gameOver&&!megaDash.active) startMegaDash();
+});
+addEventListener('keyup',  e=>keys[e.key]=false);
+
+// ══════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════
+function nearestVisible(){
+  // Zombie must be at least 20% inside the visible screen to be targetable
+  const marginX = VW * 0.20;
+  const marginY = VH * 0.20;
+  let best=null, bestD=Infinity;
+  for(const z of zombies){
+    if(z.dead) continue;
+    if(z.emerging>0) continue;
+    if(z.onFire) continue; // already burning — treated as dead, don't target
+    const scx=sx(z.x), scy=sy(z.y);
+    if(scx < marginX || scx > VW-marginX || scy < marginY || scy > VH-marginY) continue;
+    const dx=z.x-player.x, dy=z.y-player.y, d=Math.sqrt(dx*dx+dy*dy);
+    if(d<bestD){bestD=d;best=z;}
+  }
+  return best;
+}
+
+function spawnDirt(wx2, wy2){
+  // Dirt hole puddle (stays for 3s like blood)
+  for(let i=0;i<5;i++){
+    particles.push({x:wx2+(Math.random()-0.5)*8, y:wy2+(Math.random()-0.5)*6,
+      vx:0, vy:0, life:360, maxLife:360,
+      color: i%2===0 ? '#5d4037' : '#4e342e',
+      sz:4+Math.random()*5, type:'puddle', gravity:0});
+  }
+  // Flying dirt clumps
+  for(let i=0;i<12;i++){
+    const a=Math.random()*Math.PI*2, spd=1+Math.random()*3;
+    particles.push({x:wx2, y:wy2,
+      vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-2,
+      life:360, maxLife:360,
+      color: Math.random()<0.6?'#6d4c41':'#795548',
+      sz:2+Math.random()*3, type:'dirt', gravity:0.15,
+      bounceCount:0, landed:false, groundY:wy2+5+Math.random()*8,
+      rot:Math.random()*Math.PI*2, rotV:(Math.random()-0.5)*0.2});
+  }
+}
+
+function blood(wx2,wy2,n){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2, spd=1.5+Math.random()*4;
+    particles.push({x:wx2,y:wy2,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,
+      life:28+Math.random()*22,maxLife:50,color:C.blood,sz:2+Math.random()*3,type:'blood'});
+  }
+}
+
+// Gore explosion: zombie bursts in the direction of the hit
+// dirX/dirY = direction the zombie was knocked (ball impact direction)
+function goreExplosion(wx2,wy2,dirX,dirY,zColor){
+  // 1. Directional blood splatter — speed halved
+  for(let i=0;i<35;i++){
+    const spread=(Math.random()-0.5)*2.1;
+    const baseAngle=Math.atan2(dirY,dirX);
+    const a=baseAngle+spread;
+    const spd=(3+Math.random()*9)*0.5; // ×0.5
+    particles.push({x:wx2,y:wy2,
+      vx:Math.cos(a)*spd, vy:Math.sin(a)*spd,
+      life:40+Math.random()*30,maxLife:70,
+      color:Math.random()<0.7?C.blood:'#8b0000',
+      sz:2+Math.random()*4, type:'blood', gravity:0.08});
+  }
+
+  // 2. Body chunks — speed halved
+  const chunkColors=[zColor||'#9e9e9e','#888',C.blood,'#555','#c62828'];
+  for(let i=0;i<18;i++){
+    const spread=(Math.random()-0.5)*2.5;
+    const baseAngle=Math.atan2(dirY,dirX);
+    const a=baseAngle+spread;
+    const spd=(4+Math.random()*10)*0.5; // ×0.5
+    const col=chunkColors[Math.floor(Math.random()*chunkColors.length)];
+    particles.push({x:wx2,y:wy2,
+      vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-1, // -1 instead of -2
+      life:660, maxLife:660,
+      color:col, sz:3+Math.random()*5,
+      type:'chunk', gravity:0.18,
+      bounceCount:0, landed:false,
+      rot:Math.random()*Math.PI*2, rotV:(Math.random()-0.5)*0.4,
+      groundY: wy2+10+Math.random()*20});
+  }
+
+  // 3. Blood puddles — speed halved
+  for(let i=0;i<10;i++){
+    const a=Math.random()*Math.PI*2;
+    const spd=(0.8+Math.random()*2.5)*0.5; // ×0.5
+    particles.push({x:wx2,y:wy2,
+      vx:Math.cos(a)*spd, vy:Math.sin(a)*spd,
+      life:660, maxLife:660,
+      color:'#7b0000', sz:4+Math.random()*7,
+      type:'puddle', gravity:0});
+  }
+}
+
+function stars(wx2,wy2,color){
+  for(let i=0;i<8;i++){
+    const a=(i/8)*Math.PI*2;
+    particles.push({x:wx2,y:wy2,vx:Math.cos(a)*3.5,vy:Math.sin(a)*3.5,
+      life:28,maxLife:28,color:color||'#ffeb3b',sz:3.5,type:'star'});
+  }
+}
+function scorePopup(wx2,wy2,pts){
+  particles.push({x:wx2,y:wy2-10,vx:0,vy:-0.6,life:45,maxLife:45,
+    color:'#e8ff00',sz:0,text:'+'+pts});
+}
+
+// ══════════════════════════════════════
+// SCREEN BLAST — full-screen vibration effect
+// ══════════════════════════════════════
+function screenBlast(intensity){
+  cam.shake = intensity;
+  // Use navigator.vibrate for haptic on mobile
+  try{ if(navigator.vibrate) navigator.vibrate(intensity>8?[80,30,40]:[40]); }catch(e){}
+}
+
+// ══════════════════════════════════════
+// ONE UP SYSTEM
+// ══════════════════════════════════════
+// Sound: ascending power chime + deep impact boom
+function sfxOneUpEarn(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    [0,0.09,0.18,0.27].forEach((dt,i)=>{
+      const freqs=[400,530,660,880];
+      const o=ac.createOscillator(), g=ac.createGain();
+      o.type='square'; o.frequency.value=freqs[i];
+      g.gain.setValueAtTime(0.28,t0+dt); g.gain.exponentialRampToValueAtTime(0.0001,t0+dt+0.18);
+      o.connect(g); g.connect(ac.destination); o.start(t0+dt); o.stop(t0+dt+0.2);
+    });
+  }catch(e){}
+}
+function sfxOneUpActivate(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    // Deep boom
+    const ob=ac.createOscillator(), gb=ac.createGain();
+    ob.type='sine'; ob.frequency.setValueAtTime(55,t0); ob.frequency.exponentialRampToValueAtTime(20,t0+0.5);
+    gb.gain.setValueAtTime(1.0,t0); gb.gain.exponentialRampToValueAtTime(0.0001,t0+0.55);
+    ob.connect(gb); gb.connect(ac.destination); ob.start(); ob.stop(t0+0.6);
+    noise(0.35, 0.9, 200);
+    // Electric crackle
+    setTimeout(()=>{ noise(0.18,0.7,3500); noise(0.12,0.5,1800); },100);
+    // Rising power tone
+    setTimeout(()=>{
+      const or=ac.createOscillator(), gr=ac.createGain();
+      or.type='sawtooth'; or.frequency.setValueAtTime(80,ac.currentTime); or.frequency.exponentialRampToValueAtTime(900,ac.currentTime+0.6);
+      gr.gain.setValueAtTime(0.0,ac.currentTime); gr.gain.linearRampToValueAtTime(0.55,ac.currentTime+0.1);
+      gr.gain.exponentialRampToValueAtTime(0.0001,ac.currentTime+0.65);
+      const flt=ac.createBiquadFilter(); flt.type='bandpass'; flt.frequency.value=600; flt.Q.value=0.8;
+      or.connect(flt); flt.connect(gr); gr.connect(ac.destination); or.start(); or.stop(ac.currentTime+0.7);
+    },120);
+  }catch(e){}
+}
+
+// Trigger the 1UP activation sequence when HP hits 0 and oneUpCount > 0
+function triggerOneUp(){
+  oneUpCount--;
+  oneUpFX.phase=1; // start blackout
+  oneUpFX.timer=65;
+  sfxOneUpActivate();
+}
+
+// Called each frame during One Up FX — returns true while active
+function updateOneUpFX(){
+  if(oneUpFX.phase===0) return false;
+  oneUpFX.timer--;
+
+  if(oneUpFX.phase===1){
+    // Blackout: ~65 frames
+    if(oneUpFX.timer<=0){ oneUpFX.phase=2; oneUpFX.timer=45; }
+  } else if(oneUpFX.phase===2){
+    // White flash + vibrate: 45 frames
+    cam.shake=18;
+    if(oneUpFX.timer<=0){
+      // Launch shockwave, restore HP
+      oneUpFX.phase=3; oneUpFX.timer=70; oneUpFX.shockR=0;
+      player.hp=player.maxHp*0.5;
+      // Kill all zombies on screen
+      for(const z of zombies){
+        if(z.dead) continue;
+        z.dead=true; z.deadAnim=38;
+        score+=z.pts; totalKills++;
+        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+        const a=Math.random()*Math.PI*2;
+        z.knockX=Math.cos(a)*14; z.knockY=Math.sin(a)*14; z.flyingCorpse=true;
+        goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.skin||'#9e9e9e');
+        scorePopup(z.x,z.y,z.pts);
+      }
+      // Reset zombie speed
+      zombieSpeedMult=1;
+    }
+  } else if(oneUpFX.phase===3){
+    // Shockwave expanding: 70 frames
+    oneUpFX.shockR = (1-(oneUpFX.timer/70)) * 800;
+    if(oneUpFX.timer<=0){ oneUpFX.phase=0; oneUpFX.timer=0; }
+  }
+  return true;
+}
+
+function drawOneUpFX(){
+  if(oneUpFX.phase===0) return;
+  const plsx=Math.round(sx(player.x)), plsy=Math.round(sy(player.y));
+
+  if(oneUpFX.phase===1){
+    // Black overlay, player visible
+    ctx.fillStyle='rgba(0,0,0,0.94)';
+    ctx.fillRect(0,0,VW,VH);
+    // Keep player bright — redraw player area as a circle of light
+    ctx.save();
+    const grad=ctx.createRadialGradient(plsx,plsy,0,plsx,plsy,55);
+    grad.addColorStop(0,'rgba(0,0,0,0)');
+    grad.addColorStop(1,'rgba(0,0,0,0.94)');
+    ctx.globalCompositeOperation='destination-out';
+    ctx.beginPath(); ctx.arc(plsx,plsy,55,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,1)'; ctx.fill();
+    ctx.restore();
+    // Redraw player on top (bright)
+    drawPlayer();
+  } else if(oneUpFX.phase===2){
+    // White flash — intensity peaks then fades
+    const t=oneUpFX.timer/45;
+    const alpha=0.95-t*0.3;
+    ctx.fillStyle=`rgba(255,255,255,${alpha})`;
+    ctx.fillRect(0,0,VW,VH);
+    // Player stays visible in centre
+    drawPlayer();
+  } else if(oneUpFX.phase===3){
+    // Yellow shockwave ring from player
+    const r=oneUpFX.shockR*ZOOM*0.12; // screen radius
+    const alpha=Math.max(0, oneUpFX.timer/70);
+    ctx.save();
+    ctx.strokeStyle=`rgba(255,230,0,${alpha})`;
+    ctx.lineWidth=Math.max(2, 18*(oneUpFX.timer/70));
+    ctx.shadowColor='#e8ff00';
+    ctx.shadowBlur=28*(oneUpFX.timer/70);
+    ctx.beginPath(); ctx.arc(plsx,plsy,r,0,Math.PI*2); ctx.stroke();
+    // Inner glow ring
+    ctx.strokeStyle=`rgba(255,255,255,${alpha*0.6})`;
+    ctx.lineWidth=6*(oneUpFX.timer/70);
+    ctx.beginPath(); ctx.arc(plsx,plsy,r*0.7,0,Math.PI*2); ctx.stroke();
+    ctx.restore();
+  }
+}
+const PUDEF = [
+  { id:'fireball',   icon:'🔥', label:'FIRE',      color:'#ff6d00', glow:'#ff9800' },
+  { id:'bomb',       icon:'💣', label:'BOMB',       color:'#f44336', glow:'#ff1744' },
+  { id:'ricochet',   icon:'↩️',  label:'RICOCHET+1', color:'#00bcd4', glow:'#00e5ff' },
+  { id:'health',     icon:'❤️',  label:'HEALTH',     color:'#4caf50', glow:'#69f0ae' },
+  { id:'thunder',    icon:'⚡', label:'THUNDER',    color:'#ffeb3b', glow:'#ffe57f' },
+  { id:'slowmo',     icon:'🐌', label:'SLOW MO',    color:'#9c27b0', glow:'#e040fb' },
+  { id:'doubleball', icon:'⚽', label:'+1 BALL',    color:'#e8ff00', glow:'#ffffff' },
+  { id:'shotgun',    icon:'GUN', label:'SHOTGUN',   color:'#ff5722', glow:'#ff8a65' },
+  { id:'resetspeed', icon:'⏹️',  label:'SPEED×0',  color:'#00bcd4', glow:'#00e5ff' },
+  { id:'megadash',   icon:'💨', label:'MEGA',      color:'#00cfff', glow:'#00eeff' },
+  { id:'x6balls',    icon:'⚽', label:'×6 BALLS',  color:'#e8ff00', glow:'#ffffff' },
+  { id:'samurai',    icon:'⚔️', label:'SAMURAI',    color:'#c0c0c0', glow:'#ffffff' },
+];
+
+function spawnPowerup(){
+  // Spawn within visible screen area near the player
+  const margin = 30;
+  const halfW = (VW/2 - margin) / ZOOM;
+  const halfH = (VH/2 - margin) / ZOOM;
+  const MIN_DIST = 70; // minimum world-unit distance between two powerups
+
+  let wx, wy, attempts=0;
+  let tooClose;
+  do {
+    const rx = (0.3 + Math.random()*0.6) * (Math.random()<0.5?1:-1);
+    const ry = (0.3 + Math.random()*0.6) * (Math.random()<0.5?1:-1);
+    wx = player.x + rx * halfW;
+    wy = player.y + ry * halfH;
+    wx = Math.max(PITCH.x+20, Math.min(PITCH.x+PITCH.w-20, wx));
+    wy = Math.max(PITCH.y+20, Math.min(PITCH.y+PITCH.h-20, wy));
+    // Check distance from existing powerups
+    tooClose = powerups.some(p => Math.hypot(p.x-wx, p.y-wy) < MIN_DIST);
+    attempts++;
+  } while(tooClose && attempts < 40);
+
+  const def = PUDEF[Math.floor(Math.random()*PUDEF.length)];
+  powerups.push({ x:wx, y:wy, def, life:480, maxLife:480 });
+}
+
+function makeBallObj(offsetX, offsetY){
+  return {
+    x:player.x+offsetX, y:player.y+offsetY,
+    vx:0, vy:0, active:false, returning:false, r:7, spin:0,
+    footSpin:0, bounce:0, z:0, zv:0, shootCooldown:40,
+    offsetX, offsetY, // foot-position offset from player center
+  };
+}
+
+// Extra ball foot positions in order: left, above, below
+const EXTRA_BALL_OFFSETS = [
+  { x:-8,  y:0  },   // ball 2: left side
+  { x:0,   y:-12 },  // ball 3: above
+  { x:0,   y:12  },  // ball 4: below
+];
+
+function activatePowerup(def){
+  SFX.powerupPickup();
+  switch(def.id){
+    case 'fireball':
+      fx.fireBall.active=true; fx.fireBall.timer=fx.fireBall.max; break;
+    case 'bomb':
+      triggerBomb(); break;
+    case 'ricochet':
+      ricochetCount = Math.min(5, ricochetCount+1);
+      ricochetTimer = 1800; // 30s at 60fps (refresh/stack duration)
+      break;
+    case 'health':
+      player.hp=player.maxHp; break;
+    case 'thunder':
+      fx.thunder.active=true; fx.thunder.timer=fx.thunder.max; fx.thunder.nextStrike=frameCount+30; break;
+    case 'slowmo':
+      fx.slowMo.active=true; fx.slowMo.timer=fx.slowMo.max; break;
+    case 'doubleball':
+      if(extraBalls.length < 3){
+        const off = EXTRA_BALL_OFFSETS[extraBalls.length];
+        extraBalls.push(makeBallObj(off.x, off.y));
+      }
+      break;
+    case 'shotgun':
+      fx.shotgun.active=true; fx.shotgun.timer=fx.shotgun.max;
+      fx.shotgun.reloading=0; fx.shotgun.muzzleFlash=0;
+      fireShotgun();
+      break;
+    case 'resetspeed':
+      // Reset zombie speed to default (phase 1)
+      zombieSpeedMult=1;
+      // Visual flash
+      for(let i=0;i<30;i++){
+        const a=Math.random()*Math.PI*2;
+        particles.push({x:player.x,y:player.y,vx:Math.cos(a)*3,vy:Math.sin(a)*3,
+          life:30,maxLife:30,color:'#00e5ff',sz:4+Math.random()*4,type:'star'});
+      }
+      break;
+    case 'megadash':
+      startMegaDash();
+      break;
+    case 'x6balls':
+      activateX6Balls();
+      break;
+    case 'samurai':
+      activateSamurai();
+      break;
+  }
+  cam.shake=4; cam.shakeDecay=0.7;
+}
+
+// ── BOMB: kill all visible zombies ──
+function triggerBomb(){
+  SFX.bombExplode(); screenBlast(18);
+  let killed=0;
+  for(const z of zombies){
+    if(z.dead) continue;
+    const scx=sx(z.x), scy=sy(z.y);
+    if(scx>-30 && scx<VW+30 && scy>-30 && scy<VH+30){
+      z.dead=true; z.deadAnim=38;
+      score+=z.pts; totalKills++;
+      if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+      const a=Math.random()*Math.PI*2;
+      z.knockX=Math.cos(a)*6; z.knockY=Math.sin(a)*6;
+      z.flyingCorpse=true;
+      goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.body);
+      scorePopup(z.x,z.y,z.pts);
+      killed++;
+    }
+  }
+  // Big concentric shockwave particles
+  for(let i=0;i<60;i++){
+    const a2=Math.random()*Math.PI*2, spd=4+Math.random()*8;
+    particles.push({x:player.x,y:player.y,vx:Math.cos(a2)*spd,vy:Math.sin(a2)*spd,
+      life:35,maxLife:35,color:i%3===0?'#ff9800':'#ffeb3b',sz:4+Math.random()*5,type:'star'});
+  }
+}
+
+// ══════════════════════════════════════
+// X6 BALLS POWERUP — 6 balls orbiting player
+// ══════════════════════════════════════
+function activateX6Balls(){
+  // Replace any existing orbit balls, reset 20s timer
+  orbitBalls = [];
+  orbitBallsTimer = 1200; // 20s at 60fps
+  for(let i=0;i<6;i++){
+    const angle = (i/6)*Math.PI*2;
+    orbitBalls.push({
+      angle,           // current angle in orbit
+      r: ORBIT_R,     // orbit radius
+      ballR: 7,       // ball visual radius
+      active: false,  // false = orbiting, true = flying to target
+      returning: false,
+      x: player.x + Math.cos(angle)*ORBIT_R,
+      y: player.y + Math.sin(angle)*ORBIT_R,
+      vx: 0, vy: 0,
+      spin: angle,
+      shootCooldown: i*10, // stagger initial shots
+      ricochetsLeft: 0,
+      hitZombies: [],
+      z: 0, zv: 0,
+    });
+  }
+  // Burst particles
+  for(let i=0;i<6;i++){
+    const a=(i/6)*Math.PI*2;
+    particles.push({x:player.x+Math.cos(a)*ORBIT_R, y:player.y+Math.sin(a)*ORBIT_R,
+      vx:Math.cos(a)*3, vy:Math.sin(a)*3,
+      life:24, maxLife:24, color:'#e8ff00', sz:5+Math.random()*4, type:'star'});
+  }
+}
+
+function makeOrbitBallFireSeg(ob){
+  const seg={x:ob.x,y:ob.y,life:120,maxLife:120,dead:false,pixels:[]};
+  const nPx=4+Math.floor(Math.random()*4);
+  for(let i=0;i<nPx;i++) seg.pixels.push({type:'block',ox:(Math.random()-0.5)*10,oy:-(Math.random()*14),sz:5+Math.floor(Math.random()*7),col:Math.random()<0.5?'#ff6d00':Math.random()<0.6?'#ff9800':'#ffeb3b',birthLife:120});
+  const nSp=3+Math.floor(Math.random()*2);
+  for(let i=0;i<nSp;i++) seg.pixels.push({type:'spark',ox:(Math.random()-0.5)*14,oy:-(8+Math.random()*16),vox:(Math.random()-0.5)*0.25,voy:-(0.3+Math.random()*0.4),sz:2+Math.floor(Math.random()*3),col:Math.random()<0.6?'#ffeb3b':'#fff9c4',birthLife:120});
+  fireTrails.push(seg);
+}
+
+function updateOrbitBalls(){
+  if(orbitBalls.length===0) return;
+  const ORBIT_SPD = 0.045; // radians per frame — smooth rotation
+  const BALL_SPD  = 4.5;
+
+  for(let bi=0;bi<orbitBalls.length;bi++){
+    const ob=orbitBalls[bi];
+    ob.spin+=0.22;
+
+    if(!ob.active){
+      // ── ORBITING: rotate around player ──
+      ob.angle += ORBIT_SPD;
+      ob.x = player.x + Math.cos(ob.angle)*ob.r;
+      ob.y = player.y + Math.sin(ob.angle)*ob.r;
+      ob.shootCooldown--;
+
+      if(ob.shootCooldown<=0 && player.stunned<=0){
+        const t=nearestVisible();
+        if(t){
+          const dx=t.x-ob.x, dy=t.y-ob.y, d=Math.sqrt(dx*dx+dy*dy)||1;
+          ob.vx=(dx/d)*BALL_SPD; ob.vy=(dy/d)*BALL_SPD;
+          ob.active=true; ob.returning=false;
+          ob.z=0; ob.zv=3.5;
+          ob.ricochetsLeft=ricochetCount; // ricochet applies!
+          ob.hitZombies=[];
+          SFX.kick();
+        }
+      }
+
+    } else {
+      // ── FLYING ──
+      ob.x+=ob.vx; ob.y+=ob.vy;
+      if(ob.z>0||ob.zv>0){ ob.z+=ob.zv; ob.zv-=0.22; if(ob.z<0){ob.z=0;ob.zv=0;} }
+
+      // Fire trail
+      if(fx.fireBall.active && !ob.returning && frameCount%2===0) makeOrbitBallFireSeg(ob);
+
+      if(!ob.returning){
+        let didBounce=false;
+        for(const z of zombies){
+          if(z.dead||z.emerging>0) continue;
+          if(ob.hitZombies&&ob.hitZombies.includes(z)) continue;
+          const dx=ob.x-z.x, dy=ob.y-z.y, d=Math.sqrt(dx*dx+dy*dy);
+          if(d<z.w/2+ob.ballR){
+            if(ob.hitZombies) ob.hitZombies.push(z);
+            if(fx.fireBall.active){
+              igniteZombie(z); SFX.hit();
+            } else {
+              z.hp--; z.hitFlash=10; blood(z.x,z.y,12);
+              const nd=d||1; z.knockX=(dx/nd)*5; z.knockY=(dy/nd)*5;
+              SFX.hit();
+              if(z.hp<=0){
+                z.dead=true; z.deadAnim=38; score+=z.pts; totalKills++;
+                if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+                const bdx=ob.vx/(Math.sqrt(ob.vx*ob.vx+ob.vy*ob.vy)||1);
+                const bdy=ob.vy/(Math.sqrt(ob.vx*ob.vx+ob.vy*ob.vy)||1);
+                z.knockX=bdx*7; z.knockY=bdy*7; z.flyingCorpse=true;
+                goreExplosion(z.x,z.y,bdx,bdy,z.body);
+                scorePopup(z.x,z.y,z.pts); SFX.explode();
+              }
+            }
+            // Ricochet — affects all orbit balls if ricochetCount>0
+            if(ob.ricochetsLeft>0){
+              const next=zombies.filter(z2=>!z2.dead&&!z2.onFire&&z2.emerging===0&&!(ob.hitZombies&&ob.hitZombies.includes(z2)))
+                .sort((a2,b2)=>Math.hypot(a2.x-z.x,a2.y-z.y)-Math.hypot(b2.x-z.x,b2.y-z.y))[0];
+              if(next){
+                ob.ricochetsLeft--;
+                const nx=next.x-ob.x,ny=next.y-ob.y,nd2=Math.sqrt(nx*nx+ny*ny)||1;
+                ob.vx=(nx/nd2)*BALL_SPD; ob.vy=(ny/nd2)*BALL_SPD; ob.z=0; ob.zv=2;
+                didBounce=true; break;
+              }
+            }
+            if(!didBounce){
+              ob.returning=true;
+              const ang=Math.atan2(player.y-ob.y,player.x-ob.x);
+              ob.vx=Math.cos(ang)*BALL_SPD; ob.vy=Math.sin(ang)*BALL_SPD;
+              ob.z=0; ob.zv=2;
+            }
+            break;
+          }
+        }
+        // Out of pitch → return
+        if(!didBounce&&!ob.returning&&(ob.x<PITCH.x||ob.x>PITCH.x+PITCH.w||ob.y<PITCH.y||ob.y>PITCH.y+PITCH.h)){
+          ob.returning=true;
+          const ang=Math.atan2(player.y-ob.y,player.x-ob.x);
+          ob.vx=Math.cos(ang)*BALL_SPD; ob.vy=Math.sin(ang)*BALL_SPD;
+        }
+      } else {
+        // ── RETURNING: come back to orbit position ──
+        const targetX=player.x+Math.cos(ob.angle)*ob.r;
+        const targetY=player.y+Math.sin(ob.angle)*ob.r;
+        const dx=targetX-ob.x, dy=targetY-ob.y, d=Math.sqrt(dx*dx+dy*dy);
+        if(d<18){
+          ob.active=false; ob.returning=false;
+          ob.x=targetX; ob.y=targetY;
+          ob.shootCooldown=55 + bi*8; // stagger cooldowns
+        } else {
+          ob.vx=(dx/d)*BALL_SPD*1.1; ob.vy=(dy/d)*BALL_SPD*1.1;
+        }
+      }
+    }
+  }
+}
+
+function drawOrbitBalls(){
+  if(orbitBalls.length===0) return;
+  // Draw orbit trail ring when balls are home
+  const allHome = orbitBalls.every(ob=>!ob.active);
+  if(allHome){
+    // Subtle glow ring showing orbit path
+    ctx.save();
+    ctx.globalAlpha=0.12+0.05*Math.sin(frameCount*0.08);
+    ctx.strokeStyle='#e8ff00';
+    ctx.lineWidth=1.5;
+    ctx.shadowColor='#e8ff00'; ctx.shadowBlur=8;
+    ctx.beginPath();
+    ctx.arc(Math.round(sx(player.x)), Math.round(sy(player.y)), ORBIT_R*ZOOM, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  for(const ob of orbitBalls){
+    const bx=Math.round(sx(ob.x));
+    const by=Math.round(sy(ob.y-(ob.z||0)));
+    const br=Math.round(ob.ballR*ZOOM*0.8);
+
+    ctx.save();
+    // Glow
+    ctx.shadowColor='#e8ff00'; ctx.shadowBlur=10;
+    // Ball body (pentagon pixel look)
+    ctx.fillStyle='#111';
+    ctx.beginPath(); ctx.arc(bx,by,br,0,Math.PI*2); ctx.fill();
+    // White panels
+    ctx.fillStyle='#ffffff';
+    ctx.save();
+    ctx.translate(bx,by);
+    ctx.rotate(ob.spin);
+    ctx.fillRect(-br*0.45,-br*0.45,br*0.9,br*0.9);
+    ctx.fillStyle='#e8ff00';
+    ctx.fillRect(-br*0.2,-br*0.2,br*0.4,br*0.4);
+    ctx.restore();
+    ctx.restore();
+  }
+}
+
+// ══════════════════════════════════════
+// SAMURAI SWORD POWERUP
+// ══════════════════════════════════════
+function sfxSamuraiSlash(){
+  throttleSfx('slash', 80, ()=>{
+    try{
+      const ac=getAC(), t0=ac.currentTime;
+      // Sharp whoosh — high freq sweep down
+      const o=ac.createOscillator(), g=ac.createGain(), f=ac.createBiquadFilter();
+      o.type='sawtooth';
+      o.frequency.setValueAtTime(1800+Math.random()*600, t0);
+      o.frequency.exponentialRampToValueAtTime(200+Math.random()*100, t0+0.07);
+      f.type='bandpass'; f.frequency.value=1200; f.Q.value=0.5;
+      g.gain.setValueAtTime(0.35, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.08);
+      o.connect(f); f.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+0.09);
+      noise(0.04, 0.12, 2500);
+    }catch(e){}
+  });
+}
+function sfxSamuraiKill(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    // Impact + splat
+    noise(0.08, 0.5, 800); noise(0.05, 0.3, 300);
+    const o=ac.createOscillator(), g=ac.createGain();
+    o.type='sine'; o.frequency.setValueAtTime(180, t0); o.frequency.exponentialRampToValueAtTime(40, t0+0.1);
+    g.gain.setValueAtTime(0.4, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.12);
+    o.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+0.13);
+  }catch(e){}
+}
+
+function activateSamurai(){
+  samurai.active=true;
+  samurai.timer=samurai.max;
+  samurai.swingAngle=0;
+  samurai.swingDir=1;
+  samurai.ghosts=[];
+  samurai.hitCooldown=0;
+  // Flash + sound
+  screenBlast(8);
+  for(let i=0;i<20;i++){
+    const a=(i/20)*Math.PI*2;
+    particles.push({x:player.x,y:player.y,
+      vx:Math.cos(a)*4,vy:Math.sin(a)*4,
+      life:22,maxLife:22,color:i%2===0?'#c0c0c0':'#ffffff',sz:3+Math.random()*4,type:'star'});
+  }
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    [0,0.06,0.12].forEach((dt,i)=>{
+      const o=ac.createOscillator(), g=ac.createGain();
+      o.type='sawtooth'; o.frequency.setValueAtTime([900,1200,1600][i],t0+dt);
+      o.frequency.exponentialRampToValueAtTime([300,400,550][i],t0+dt+0.09);
+      g.gain.setValueAtTime(0.3,t0+dt); g.gain.exponentialRampToValueAtTime(0.0001,t0+dt+0.1);
+      o.connect(g); g.connect(ac.destination); o.start(t0+dt); o.stop(t0+dt+0.11);
+    });
+  }catch(e){}
+}
+
+function updateSamurai(){
+  if(!samurai.active) return;
+  samurai.timer--;
+  if(samurai.timer<=0){ samurai.active=false; samurai.ghosts=[]; return; }
+
+  // ── Constant wild sword swinging — reverses every ~22 frames ──
+  samurai.swingAngle += samurai.swingDir * samurai.swingSpeed;
+  // Reverse at extremes: swing covers a wide arc (−2.2 to +2.2 rad from base)
+  if(samurai.swingAngle > 2.2){ samurai.swingDir=-1; sfxSamuraiSlash(); }
+  if(samurai.swingAngle < -2.2){ samurai.swingDir=1; sfxSamuraiSlash(); }
+
+  // ── Sword hit radius — tip of blade ──
+  const BLADE_LEN = 32; // world units
+  const BASE_ANG = player.dir > 0 ? 0 : Math.PI; // faces player direction
+  const swordAng = BASE_ANG + samurai.swingAngle;
+  const tipX = player.x + Math.cos(swordAng) * BLADE_LEN;
+  const tipY = player.y + Math.sin(swordAng) * BLADE_LEN;
+
+  if(samurai.hitCooldown>0) samurai.hitCooldown--;
+
+  // Kill zombies touched by sword tip/arc — sweep the full blade
+  for(const z of zombies){
+    if(z.dead) continue;
+    // Check along blade (3 test points)
+    let hit=false;
+    for(let t=0.4;t<=1.0;t+=0.3){
+      const bx=player.x+Math.cos(swordAng)*BLADE_LEN*t;
+      const by=player.y+Math.sin(swordAng)*BLADE_LEN*t;
+      if(Math.hypot(bx-z.x, by-z.y) < z.w/2+10){ hit=true; break; }
+    }
+    if(hit && samurai.hitCooldown===0){
+      z.hp=0; z.dead=true; z.deadAnim=38;
+      score+=z.pts; totalKills++;
+      if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+      const ka=Math.atan2(z.y-player.y, z.x-player.x);
+      z.knockX=Math.cos(ka)*9; z.knockY=Math.sin(ka)*9; z.flyingCorpse=true;
+      goreExplosion(z.x,z.y,Math.cos(ka),Math.sin(ka),z.skin||'#9e9e9e');
+      scorePopup(z.x,z.y,z.pts);
+      sfxSamuraiKill(); screenBlast(4);
+      samurai.hitCooldown=6; // brief cooldown to avoid multi-hit same frame
+      // Slash particles along blade
+      for(let i=0;i<8;i++){
+        const sp=0.3+i/8*0.7;
+        const a2=swordAng+(-Math.PI/2+Math.random()*Math.PI)*0.4;
+        particles.push({
+          x:player.x+Math.cos(swordAng)*BLADE_LEN*sp,
+          y:player.y+Math.sin(swordAng)*BLADE_LEN*sp,
+          vx:Math.cos(a2)*3, vy:Math.sin(a2)*3,
+          life:14,maxLife:14,
+          color:Math.random()<0.5?'#c62828':Math.random()<0.5?'#ffffff':'#c0c0c0',
+          sz:2+Math.random()*3, type:'star'});
+      }
+    }
+  }
+
+  // ── Player moves 40% faster with samurai ──
+  // (handled in the player move block via samurai.active flag)
+
+  // ── Ninja ghost trail — leave dark ghost every 5 frames when moving ──
+  samurai.ghostTimer++;
+  const isMoving = Math.abs(player.knockX)>0.5 || Math.abs(player.knockY)>0.5 ||
+    joystickActive || keys['ArrowLeft']||keys['ArrowRight']||keys['ArrowUp']||keys['ArrowDown']||
+    keys['a']||keys['d']||keys['w']||keys['s'];
+  if(isMoving && samurai.ghostTimer>=2){  // every 2 frames = denser trail
+    samurai.ghostTimer=0;
+    samurai.ghosts.push({
+      x:player.x, y:player.y,
+      dir:player.dir,
+      alpha:0.72,
+      life:36, maxLife:36,  // 2× longer trail
+    });
+  }
+  samurai.ghosts=samurai.ghosts.filter(g=>{ g.life--; g.alpha=0.72*(g.life/g.maxLife); return g.life>0; });
+}
+
+function drawSamuraiGhosts(){
+  if(!samurai.active && samurai.ghosts.length===0) return;
+  for(const g of samurai.ghosts){
+    const gx=Math.round(sx(g.x)), gy=Math.round(sy(g.y));
+    const d2=g.dir||1;
+    ctx.save();
+    ctx.globalAlpha=g.alpha;
+    // Full ninja silhouette in deep dark purple/blue
+    const sc='#0a0a1a';
+    // Legs
+    ctx.fillStyle=sc; ctx.fillRect(gx-3,gy+7,4,9); ctx.fillRect(gx,gy+7,4,9);
+    // Body / gi
+    ctx.fillRect(gx-6,gy-5,12,13);
+    // Arms
+    ctx.fillRect(gx-9,gy-4,3,8); ctx.fillRect(gx+6,gy-4,3,8);
+    // Head + mask (covering face fully — only eyes gap)
+    ctx.fillRect(gx-7,gy-22,14,15);
+    // Faint eye slit in lighter purple
+    ctx.fillStyle='rgba(100,80,180,0.6)';
+    ctx.fillRect(gx-4,gy-16,8,2);
+    ctx.restore();
+  }
+}
+
+// Draw ninja costume overlay on top of player when samurai is active
+function drawNinjaCostume(){
+  if(!samurai.active) return;
+  const x=Math.round(sx(player.x)), y=Math.round(sy(player.y));
+  const d=player.dir;
+
+  // ── Black ninja gi (body) over jersey ──
+  ctx.fillStyle='#0d0d0d';
+  ctx.fillRect(x-7,y-6,14,10); // torso
+  // gi collar flap
+  ctx.fillStyle='#222';
+  ctx.fillRect(x-2,y-6,4,5);
+  // gi belt (white obi)
+  ctx.fillStyle='#e0e0e0';
+  ctx.fillRect(x-7,y+1,14,2);
+
+  // ── Black arms / sleeves ──
+  ctx.fillStyle='#0d0d0d';
+  ctx.fillRect(x-9,y-5,3,8); // back arm
+  ctx.fillRect(x+6,y-5,3,8); // front arm
+  // hand wraps
+  ctx.fillStyle='#333';
+  ctx.fillRect(x-9,y+1,3,2);
+  ctx.fillRect(x+6,y+1,3,2);
+
+  // ── Black pants ──
+  ctx.fillStyle='#111';
+  ctx.fillRect(x-4,y+7,4,9); // back leg
+  ctx.fillRect(x,y+7,4,9);   // front leg
+
+  // ── Ninja mask (covers hair + lower face, leaves only eye slit) ──
+  // Black head wrap (top portion)
+  ctx.fillStyle='#0d0d0d';
+  ctx.fillRect(x-7,y-22,14,10); // top of head / headwrap
+  // Mask (lower face)
+  ctx.fillRect(x-7,y-13,14,8);
+  // Eye slit — narrow strip left uncovered
+  ctx.fillStyle='#1a0a0a'; // very dark red tint
+  ctx.fillRect(x-5,y-14,10,3);
+  // Eyes glowing red (ninja eyes)
+  ctx.fillStyle='#cc1111';
+  ctx.fillRect(x-4,y-14,3,2);
+  ctx.fillRect(x+1,y-14,3,2);
+  // Red pupils
+  ctx.fillStyle='#ff3333';
+  ctx.fillRect(x-3+d,y-14,1,1);
+  ctx.fillRect(x+2+d,y-14,1,1);
+
+  // ── Speed lines — quick slashes around ninja ──
+  if(frameCount%3===0){
+    ctx.strokeStyle='rgba(180,180,255,0.25)';
+    ctx.lineWidth=1;
+    for(let i=0;i<3;i++){
+      const a=Math.random()*Math.PI*2;
+      const r=8+Math.random()*10;
+      ctx.beginPath();
+      ctx.moveTo(x+Math.cos(a)*r, y+Math.sin(a)*r);
+      ctx.lineTo(x+Math.cos(a)*(r+8), y+Math.sin(a)*(r+8));
+      ctx.stroke();
+    }
+  }
+}
+
+function drawSamuraiSword(){
+  if(!samurai.active) return;
+  const px=Math.round(sx(player.x)), py=Math.round(sy(player.y));
+  const BASE_ANG = player.dir>0 ? 0 : Math.PI;
+  const swordAng = BASE_ANG + samurai.swingAngle;
+
+  const BLADE_PX = Math.round(32*ZOOM*0.42); // blade length in screen pixels
+  const HANDLE_PX = Math.round(10*ZOOM*0.42);
+  const GUARD_PX  = Math.round(6*ZOOM*0.42);
+
+  // Pivot: player hand area
+  const pivX = px + (player.dir>0?6:-6);
+  const pivY = py - 2;
+
+  ctx.save();
+  ctx.translate(pivX, pivY);
+  ctx.rotate(swordAng);
+
+  // ── Handle (tsuka) — dark brown wrapped ──
+  ctx.fillStyle='#4a2c0a';
+  ctx.fillRect(-HANDLE_PX, -2, HANDLE_PX, 4);
+  // wrap detail
+  ctx.fillStyle='#2a1a05';
+  for(let i=0;i<3;i++) ctx.fillRect(-HANDLE_PX+i*4+1, -2, 2, 4);
+
+  // ── Guard (tsuba) — silver circle ──
+  ctx.fillStyle='#888';
+  ctx.beginPath(); ctx.arc(0,0,GUARD_PX*0.5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#aaa';
+  ctx.beginPath(); ctx.arc(0,0,GUARD_PX*0.3,0,Math.PI*2); ctx.fill();
+
+  // ── Blade — bright silver with glow ──
+  ctx.shadowColor='rgba(220,240,255,0.9)'; ctx.shadowBlur=8;
+  // Main blade — tapers to tip
+  ctx.beginPath();
+  ctx.moveTo(0, -2);
+  ctx.lineTo(BLADE_PX, -1);
+  ctx.lineTo(BLADE_PX+3, 0); // tip
+  ctx.lineTo(BLADE_PX, 1);
+  ctx.lineTo(0, 2);
+  ctx.closePath();
+  ctx.fillStyle='#ddeeff';
+  ctx.fill();
+  // Bright edge (ha) — top edge
+  ctx.strokeStyle='#ffffff'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(0,-1); ctx.lineTo(BLADE_PX+2,0); ctx.stroke();
+  // Spine (mune) — darker bottom
+  ctx.strokeStyle='#99bbcc'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(0,1); ctx.lineTo(BLADE_PX,1); ctx.stroke();
+
+  // ── Swing arc trail — flash at reversal ──
+  const swingProgress=Math.abs(samurai.swingAngle)/2.2;
+  ctx.globalAlpha=0.18+0.1*swingProgress;
+  ctx.strokeStyle='#aaddff'; ctx.lineWidth=3; ctx.shadowBlur=14;
+  ctx.beginPath(); ctx.moveTo(BLADE_PX*0.4, 0); ctx.lineTo(BLADE_PX+2, 0); ctx.stroke();
+
+  ctx.restore();
+}
+
+// ══════════════════════════════════════
+// MEGA DASH POWERUP
+// ══════════════════════════════════════
+function sfxMegaDashStart(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    // Electric charge-up whoosh
+    const o=ac.createOscillator(), g=ac.createGain(), f=ac.createBiquadFilter();
+    o.type='sawtooth';
+    o.frequency.setValueAtTime(120, t0); o.frequency.exponentialRampToValueAtTime(2200, t0+0.22);
+    f.type='bandpass'; f.frequency.value=1400; f.Q.value=0.6;
+    g.gain.setValueAtTime(0.0, t0); g.gain.linearRampToValueAtTime(0.7, t0+0.05);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0+0.26);
+    o.connect(f); f.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+0.28);
+    noise(0.12, 0.6, 3000); noise(0.08, 0.4, 1200);
+    // Deep bass kick
+    const ob=ac.createOscillator(), gb=ac.createGain();
+    ob.type='sine'; ob.frequency.setValueAtTime(90,t0); ob.frequency.exponentialRampToValueAtTime(25,t0+0.18);
+    gb.gain.setValueAtTime(0.85,t0); gb.gain.exponentialRampToValueAtTime(0.0001,t0+0.22);
+    ob.connect(gb); gb.connect(ac.destination); ob.start(); ob.stop(t0+0.23);
+  }catch(e){}
+}
+function sfxMegaDashLoop(){
+  throttleSfx('mdl', 120, ()=>{
+    try{
+      const ac=getAC(), t0=ac.currentTime;
+      const o=ac.createOscillator(), g=ac.createGain(), f=ac.createBiquadFilter();
+      o.type='sawtooth';
+      o.frequency.setValueAtTime(800+Math.random()*400, t0);
+      o.frequency.exponentialRampToValueAtTime(200, t0+0.09);
+      f.type='bandpass'; f.frequency.value=1800; f.Q.value=1.0;
+      g.gain.setValueAtTime(0.22, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.1);
+      o.connect(f); f.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+0.11);
+      noise(0.04, 0.15, 2200);
+    }catch(e){}
+  });
+}
+function sfxMegaDashEnd(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    [0,0.07,0.14].forEach((dt,i)=>{
+      const f2=[500,350,200][i];
+      const o=ac.createOscillator(), g=ac.createGain();
+      o.type='sine'; o.frequency.setValueAtTime(f2,t0+dt); o.frequency.exponentialRampToValueAtTime(f2*0.4,t0+dt+0.12);
+      g.gain.setValueAtTime(0.35,t0+dt); g.gain.exponentialRampToValueAtTime(0.0001,t0+dt+0.14);
+      o.connect(g); g.connect(ac.destination); o.start(t0+dt); o.stop(t0+dt+0.16);
+    });
+  }catch(e){}
+}
+
+function _randomDir(){
+  const a = Math.random()*Math.PI*2;
+  return { dx: Math.cos(a), dy: Math.sin(a) };
+}
+
+function startMegaDash(){
+  if(megaDash.active) return;
+  megaDash.active=true;
+  megaDash.timer=megaDash.max;
+  megaDash.lasers=[];
+  megaDash.lowHpBtn=false;
+  megaDash.lowHpUsed=true;
+  // Use joystick/keyboard if active, otherwise random direction
+  let dx, dy;
+  const jx=joystickDelta.x, jy=joystickDelta.y;
+  const jlen=Math.sqrt(jx*jx+jy*jy);
+  let kx=0,ky=0;
+  if(keys['ArrowLeft']||keys['a']) kx=-1;
+  if(keys['ArrowRight']||keys['d']) kx=1;
+  if(keys['ArrowUp']||keys['w'])  ky=-1;
+  if(keys['ArrowDown']||keys['s']) ky=1;
+  if(kx!==0||ky!==0){ const kl=Math.sqrt(kx*kx+ky*ky); dx=kx/kl; dy=ky/kl; }
+  else if(jlen>=5){ dx=jx/jlen; dy=jy/jlen; }
+  else { const r=_randomDir(); dx=r.dx; dy=r.dy; } // random if no input
+  megaDash.vx=dx; megaDash.vy=dy;
+  megaDash.pendingVx=dx; megaDash.pendingVy=dy;
+  // Start immediately in hop phase
+  megaDash.phase='hop';
+  megaDash.phaseTimer=megaDash.HOP_DUR;
+  megaDash.hopStartX=player.x; megaDash.hopStartY=player.y;
+  sfxMegaDashStart();
+  screenBlast(14);
+  for(let i=0;i<40;i++){
+    const a=(i/40)*Math.PI*2;
+    particles.push({x:player.x,y:player.y,
+      vx:Math.cos(a)*(5+Math.random()*5), vy:Math.sin(a)*(5+Math.random()*5),
+      life:30,maxLife:30,color:i%3===0?'#00eeff':i%3===1?'#ffffff':'#0066ff',
+      sz:3+Math.random()*5,type:'star'});
+  }
+}
+
+function _readInputDir(){
+  // Read joystick / keyboard for direction (normalized), return {dx,dy} or null if no input
+  let dx=joystickDelta.x, dy=joystickDelta.y;
+  let kx=0, ky=0;
+  if(keys['ArrowLeft']||keys['a']) kx=-1;
+  if(keys['ArrowRight']||keys['d']) kx=1;
+  if(keys['ArrowUp']||keys['w'])  ky=-1;
+  if(keys['ArrowDown']||keys['s']) ky=1;
+  if(kx!==0||ky!==0){ dx=kx; dy=ky; }
+  const l=Math.sqrt(dx*dx+dy*dy);
+  if(l<5) return null;
+  return {dx:dx/l, dy:dy/l};
+}
+
+function updateMegaDash(){
+  if(!megaDash.active) return;
+
+  // Age laser trails
+  megaDash.lasers=megaDash.lasers.filter(l=>{ l.life--; return l.life>0; });
+
+  megaDash.timer--;
+  if(megaDash.timer<=0){
+    megaDash.active=false;
+    sfxMegaDashEnd();
+    screenBlast(6);
+    return;
+  }
+
+  megaDash.phaseTimer--;
+
+  if(megaDash.phase==='pause'){
+    // ── PAUSE PHASE: read input for next hop direction ──
+    const inp=_readInputDir();
+    if(inp){ megaDash.pendingVx=inp.dx; megaDash.pendingVy=inp.dy; }
+    // No input → keep current pending (set to random on transition)
+
+    // Electric idle sparks during pause
+    if(frameCount%4===0){
+      for(let i=0;i<2;i++){
+        const a=Math.random()*Math.PI*2;
+        particles.push({x:player.x+(Math.random()-0.5)*10, y:player.y+(Math.random()-0.5)*10,
+          vx:Math.cos(a)*1.5, vy:Math.sin(a)*1.5,
+          life:12,maxLife:12,color:Math.random()<0.5?'#00eeff':'#ffffff',
+          sz:2+Math.random()*3,type:'star'});
+      }
+    }
+
+    if(megaDash.phaseTimer<=0){
+      // Transition to hop: lock direction from pending
+      megaDash.vx=megaDash.pendingVx; megaDash.vy=megaDash.pendingVy;
+      if(megaDash.vx>0.1) player.dir=1; else if(megaDash.vx<-0.1) player.dir=-1;
+      megaDash.phase='hop';
+      megaDash.phaseTimer=megaDash.HOP_DUR;
+      megaDash.hopStartX=player.x; megaDash.hopStartY=player.y;
+      sfxMegaDashLoop();
+      screenBlast(5);
+    }
+
+  } else {
+    // ── HOP PHASE: blast forward at ultra speed, direction LOCKED ──
+    const DASH_SPD=18; // ×2 of previous 9 — éclair speed
+    player.x+=megaDash.vx*DASH_SPD;
+    player.y+=megaDash.vy*DASH_SPD;
+    player.x=Math.max(PITCH.x+player.w/2, Math.min(PITCH.x+PITCH.w-player.w/2, player.x));
+    player.y=Math.max(PITCH.y+player.h/2, Math.min(PITCH.y+PITCH.h-player.h/2, player.y));
+
+    // Kill zombies on contact during hop
+    for(const z of zombies){
+      if(z.dead) continue;
+      const zdx=z.x-player.x, zdy=z.y-player.y;
+      if(Math.sqrt(zdx*zdx+zdy*zdy)<z.w/2+player.w+10){
+        z.hp=0; z.dead=true; z.deadAnim=38;
+        score+=z.pts; totalKills++;
+        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+        const ka=Math.atan2(zdy,zdx);
+        z.knockX=Math.cos(ka)*12; z.knockY=Math.sin(ka)*12; z.flyingCorpse=true;
+        goreExplosion(z.x,z.y,Math.cos(ka),Math.sin(ka),z.skin||'#9e9e9e');
+        scorePopup(z.x,z.y,z.pts);
+      }
+    }
+
+    // Electric arc sparks during hop
+    for(let i=0;i<8;i++){
+      const a=Math.random()*Math.PI*2;
+      particles.push({x:player.x+(Math.random()-0.5)*10, y:player.y+(Math.random()-0.5)*10,
+        vx:Math.cos(a)*(2+Math.random()*4), vy:Math.sin(a)*(2+Math.random()*4),
+        life:8+Math.floor(Math.random()*8), maxLife:16,
+        color:Math.random()<0.4?'#00eeff':Math.random()<0.5?'#ffffff':'#ffff88',
+        sz:1+Math.random()*3, type:'star'});
+    }
+    // Electric arc bolt between two random points around player
+    if(frameCount%2===0){
+      const a1=Math.random()*Math.PI*2, a2=a1+Math.PI*(0.3+Math.random()*0.5);
+      const r1=6+Math.random()*8;
+      particles.push({
+        x:player.x+Math.cos(a1)*r1, y:player.y+Math.sin(a1)*r1,
+        vx:(Math.cos(a2)-Math.cos(a1))*0.3, vy:(Math.sin(a2)-Math.sin(a1))*0.3,
+        life:5, maxLife:5,
+        color:'#00eeff', sz:1.5, type:'star'});
+    }
+
+    if(megaDash.phaseTimer<=0){
+      // End of hop: record laser segment from start → current pos
+      megaDash.lasers.push({
+        x1:megaDash.hopStartX, y1:megaDash.hopStartY,
+        x2:player.x, y2:player.y,
+        life:90, maxLife:90,  // ~1.5s fade
+      });
+      // Mini shockwave at landing spot
+      for(let i=0;i<14;i++){
+        const a=(i/14)*Math.PI*2;
+        particles.push({x:player.x,y:player.y,
+          vx:Math.cos(a)*3.5, vy:Math.sin(a)*3.5,
+          life:18,maxLife:18,color:i%2===0?'#00eeff':'#ffffff',sz:3+Math.random()*3,type:'star'});
+      }
+      // Transition to pause — pre-set pending to a NEW random direction
+      // Player can override it during the pause window; if they don't, random fires
+      megaDash.phase='pause';
+      megaDash.phaseTimer=megaDash.PAUSE_DUR;
+      const rnd=_randomDir();
+      megaDash.pendingVx=rnd.dx; megaDash.pendingVy=rnd.dy;
+    }
+  }
+}
+
+// Re-check input once per frame during pause and override random if player steers
+// (already handled inside pause block via _readInputDir — nothing extra needed)
+
+function drawMegaDashTrail(){
+  // Draw laser segments (hop trails)
+  for(const l of megaDash.lasers){
+    const alpha=l.life/l.maxLife;
+    const lx1=sx(l.x1), ly1=sy(l.y1), lx2=sx(l.x2), ly2=sy(l.y2);
+    const thick=(12+8*alpha)*ZOOM*0.4; // thick laser, fades
+
+    ctx.save();
+    ctx.globalAlpha=alpha;
+    // Outer glow (wide, soft)
+    ctx.shadowColor='#00eeff'; ctx.shadowBlur=Math.round(32*alpha);
+    ctx.strokeStyle=`rgba(0,200,255,${alpha*0.5})`;
+    ctx.lineWidth=thick*2.5;
+    ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(lx1,ly1); ctx.lineTo(lx2,ly2); ctx.stroke();
+    // Mid glow
+    ctx.shadowBlur=Math.round(16*alpha);
+    ctx.strokeStyle=`rgba(100,230,255,${alpha*0.8})`;
+    ctx.lineWidth=thick;
+    ctx.beginPath(); ctx.moveTo(lx1,ly1); ctx.lineTo(lx2,ly2); ctx.stroke();
+    // Bright white core
+    ctx.shadowBlur=6;
+    ctx.strokeStyle=`rgba(255,255,255,${alpha})`;
+    ctx.lineWidth=Math.max(1, thick*0.35);
+    ctx.beginPath(); ctx.moveTo(lx1,ly1); ctx.lineTo(lx2,ly2); ctx.stroke();
+    // ── Electric branch sparks along the laser ──
+    ctx.shadowColor='#00eeff'; ctx.shadowBlur=10;
+    ctx.strokeStyle=`rgba(0,238,255,${alpha*0.7})`;
+    ctx.lineWidth=1;
+    const segLen=Math.hypot(lx2-lx1,ly2-ly1);
+    const nBranches=Math.floor(segLen/18);
+    for(let bi=0;bi<nBranches;bi++){
+      const t2=(bi+0.5)/nBranches;
+      const bx=lx1+(lx2-lx1)*t2, by=ly1+(ly2-ly1)*t2;
+      const perpA=Math.atan2(ly2-ly1,lx2-lx1)+Math.PI/2;
+      const blen=(4+Math.random()*8)*alpha;
+      const side=Math.random()<0.5?1:-1;
+      const ex=bx+Math.cos(perpA)*blen*side+(Math.random()-0.5)*4;
+      const ey=by+Math.sin(perpA)*blen*side+(Math.random()-0.5)*4;
+      ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(ex,ey); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Energy ball + electricity around player while megaDash is active
+  if(megaDash.active){
+    const px=sx(player.x), py=sy(player.y);
+    const pulse=0.8+0.2*Math.sin(frameCount*0.25);
+    const r=Math.round((player.w*ZOOM*0.85)*pulse);
+    ctx.save();
+    // Outer soft glow
+    ctx.globalAlpha=0.35+0.15*Math.sin(frameCount*0.18);
+    ctx.shadowColor='#00eeff'; ctx.shadowBlur=30;
+    ctx.strokeStyle='#00cfff';
+    ctx.lineWidth=6;
+    ctx.beginPath(); ctx.arc(px,py,r*1.5,0,Math.PI*2); ctx.stroke();
+    // Mid ring
+    ctx.globalAlpha=0.6+0.2*Math.sin(frameCount*0.3);
+    ctx.shadowBlur=18;
+    ctx.strokeStyle='#00eeff';
+    ctx.lineWidth=3.5;
+    ctx.beginPath(); ctx.arc(px,py,r,0,Math.PI*2); ctx.stroke();
+    // Inner bright ring
+    ctx.globalAlpha=0.9;
+    ctx.shadowBlur=8;
+    ctx.strokeStyle='#ffffff';
+    ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(px,py,r*0.6,0,Math.PI*2); ctx.stroke();
+    // Rotating arc
+    const rot=(frameCount*0.18)%(Math.PI*2);
+    ctx.globalAlpha=0.7;
+    ctx.strokeStyle='#00eeff';
+    ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.arc(px,py,r,rot,rot+Math.PI*1.1); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px,py,r,rot+Math.PI,rot+Math.PI*2.1); ctx.stroke();
+
+    // ── Electric arc bolts jumping around the player ──
+    ctx.globalAlpha=0.8;
+    ctx.shadowColor='#00eeff'; ctx.shadowBlur=14;
+    ctx.strokeStyle='#00eeff'; ctx.lineWidth=1.2;
+    for(let i=0;i<4;i++){
+      const a1=(frameCount*0.15+i*Math.PI*0.5)%(Math.PI*2);
+      const a2=a1+0.6+Math.random()*0.8;
+      const r1=r*(0.7+Math.random()*0.5);
+      const r2=r*(0.7+Math.random()*0.5);
+      // Jagged bolt: 3 segments
+      const x1=px+Math.cos(a1)*r1, y1=py+Math.sin(a1)*r1;
+      const x2=px+Math.cos(a2)*r2, y2=py+Math.sin(a2)*r2;
+      const mx2=(x1+x2)/2+(Math.random()-0.5)*12, my2=(y1+y2)/2+(Math.random()-0.5)*12;
+      ctx.beginPath();
+      ctx.moveTo(x1,y1); ctx.lineTo(mx2,my2); ctx.lineTo(x2,y2);
+      ctx.stroke();
+    }
+    // Yellow lightning flashes
+    ctx.globalAlpha=0.4;
+    ctx.strokeStyle='#ffff88'; ctx.lineWidth=1; ctx.shadowColor='#ffff00'; ctx.shadowBlur=8;
+    for(let i=0;i<2;i++){
+      const a=Math.random()*Math.PI*2;
+      const x1=px+Math.cos(a)*r*0.3, y1=py+Math.sin(a)*r*0.3;
+      const x2=px+Math.cos(a+0.4+Math.random())*r*1.3, y2=py+Math.sin(a+0.4+Math.random())*r*1.3;
+      ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+function drawMegaDashButton(){
+  const show = !megaDash.active && !megaDash.lowHpUsed && player.hp<=20 && player.hp>0;
+  megaDash.lowHpBtn = show;
+  if(!show) return;
+
+  const {x,y,w,h} = MEGA_BTN;
+  const t = frameCount;
+  const pulse = 0.82+0.18*Math.sin(t*0.15);
+  const glowR  = 18+10*Math.abs(Math.sin(t*0.1));
+
+  function rr(cx,cy,cw,ch,cr){
+    ctx.beginPath();
+    ctx.moveTo(cx+cr,cy);
+    ctx.lineTo(cx+cw-cr,cy); ctx.arcTo(cx+cw,cy,cx+cw,cy+cr,cr);
+    ctx.lineTo(cx+cw,cy+ch-cr); ctx.arcTo(cx+cw,cy+ch,cx+cw-cr,cy+ch,cr);
+    ctx.lineTo(cx+cr,cy+ch); ctx.arcTo(cx,cy+ch,cx,cy+ch-cr,cr);
+    ctx.lineTo(cx,cy+cr); ctx.arcTo(cx,cy,cx+cr,cy,cr);
+    ctx.closePath();
+  }
+
+  ctx.save();
+
+  // ── Strong outer glow halo ──
+  ctx.shadowColor='#00eeff'; ctx.shadowBlur=glowR*2;
+  ctx.globalAlpha=0.4*pulse;
+  ctx.fillStyle='#00eeff';
+  rr(x-6,y-6,w+12,h+12,14); ctx.fill();
+
+  // ── Button background ──
+  ctx.globalAlpha=0.96;
+  ctx.shadowBlur=glowR;
+  ctx.fillStyle='#001a2e';
+  rr(x,y,w,h,12); ctx.fill();
+
+  // ── Pulsing border (double border for emphasis) ──
+  ctx.globalAlpha=pulse;
+  ctx.strokeStyle='#00eeff'; ctx.lineWidth=3.5;
+  ctx.shadowColor='#00eeff'; ctx.shadowBlur=glowR;
+  rr(x,y,w,h,12); ctx.stroke();
+  ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.lineWidth=1;
+  ctx.shadowBlur=0;
+  rr(x+4,y+4,w-8,h-8,9); ctx.stroke();
+
+  // ── Main label — BOLD, twice bigger ──
+  ctx.globalAlpha=1;
+  ctx.shadowColor='#00eeff'; ctx.shadowBlur=20;
+  ctx.fillStyle='#00eeff';
+  ctx.font='bold 22px Courier New';
+  ctx.textAlign='center';
+  ctx.fillText('⚡ MEGA POWER ⚡', x+w/2, y+h/2+2);
+
+  // ── Sub label ──
+  ctx.fillStyle='#ffffff';
+  ctx.font='bold 11px Courier New';
+  ctx.shadowBlur=8;
+  ctx.fillText('TAP TO ACTIVATE', x+w/2, y+h/2+17);
+
+  // ── Animated bouncing arrow above button ──
+  const arrowBounce = 6*Math.abs(Math.sin(t*0.18)); // bounces up/down
+  const arrowY = y - 16 - arrowBounce;
+  const arrowCX = x+w/2;
+
+  ctx.shadowColor='#00eeff'; ctx.shadowBlur=22;
+  ctx.globalAlpha=0.9+0.1*Math.sin(t*0.2);
+  // Arrow shaft
+  ctx.fillStyle='#00eeff';
+  ctx.fillRect(arrowCX-3, arrowY-2, 6, 14);
+  // Arrow head (pointing down toward button)
+  ctx.beginPath();
+  ctx.moveTo(arrowCX-12, arrowY+10);
+  ctx.lineTo(arrowCX+12, arrowY+10);
+  ctx.lineTo(arrowCX, arrowY+24);
+  ctx.closePath();
+  ctx.fill();
+  // White core highlight on arrow
+  ctx.fillStyle='#ffffff';
+  ctx.globalAlpha=0.6;
+  ctx.fillRect(arrowCX-1, arrowY-2, 2, 12);
+
+  ctx.restore();
+}
+
+// ── FIRE ZOMBIE: set a zombie on fire ──
+function makeFireParticle(z){
+  // Each fire particle: a big pixel block that floats up slowly with wobble
+  const col=Math.random()<0.55?'#ff6d00':Math.random()<0.6?'#ffeb3b':'#ff3d00';
+  return {
+    ox: (Math.random()-0.5)*(z.w*0.9),   // offset from zombie center X
+    oy: (Math.random())*(z.h*0.5)+(z.h*0.1), // offset Y (body height)
+    vx: (Math.random()-0.5)*0.22,          // slow horizontal drift
+    vy: -(0.28+Math.random()*0.32),        // slow upward rise
+    life: 30+Math.floor(Math.random()*50), // long life for slow anim
+    maxLife: 80,
+    sz: 5+Math.floor(Math.random()*5),     // large pixel block 5–9px
+    col,
+    phase: Math.random()*Math.PI*2,        // wobble phase
+    isSpark: Math.random()<0.18,           // 18% are sparks (smaller, faster, chaotic)
+  };
+}
+
+function igniteZombie(z){
+  if(z.dead||z.onFire) return;
+  z.onFire=true;
+  z.fireTimer=180;      // 3s on fire before ash
+  z.fireFrozen=true;    // zombie freezes — can't move while burning
+  z.vx=0; z.vy=0;
+  z.knockX=0; z.knockY=0;
+  z.fireParticles=[];
+  for(let i=0;i<12;i++) z.fireParticles.push(makeFireParticle(z));
+}
+
+// ── SHOTGUN FIRE in a direction ──
+function fireShotgun(){
+  // Always aim toward nearest visible zombie, fallback to player direction
+  const t=nearestVisible();
+  let dirX=player.dir, dirY=0;
+  if(t){ const dx=t.x-player.x,dy=t.y-player.y,d=Math.sqrt(dx*dx+dy*dy)||1; dirX=dx/d; dirY=dy/d; }
+  const baseAng=Math.atan2(dirY,dirX);
+
+  // Store aim for drawing
+  fx.shotgun.aimX=dirX; fx.shotgun.aimY=dirY;
+  fx.shotgun.muzzleFlash=14;
+
+  SFX.shotgunFire(); screenBlast(8);
+
+  // Kill all zombies in narrow beam to screen edge (±15°)
+  for(const z of zombies){
+    if(z.dead||z.emerging>0) continue;
+    const dx=z.x-player.x, dy=z.y-player.y;
+    const ang=Math.atan2(dy,dx);
+    let diff=ang-baseAng;
+    while(diff>Math.PI) diff-=Math.PI*2;
+    while(diff<-Math.PI) diff+=Math.PI*2;
+    if(Math.abs(diff)<Math.PI*0.08){
+      z.hp=0; z.dead=true; z.deadAnim=38;
+      score+=z.pts; totalKills++;
+      if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+      z.knockX=dirX*9; z.knockY=dirY*9;
+      z.flyingCorpse=true;
+      goreExplosion(z.x,z.y,dirX,dirY,z.body);
+      scorePopup(z.x,z.y,z.pts);
+    }
+  }
+  // Beam flash particles
+  for(let i=0;i<18;i++){
+    const dist=30+i*24, spread=(Math.random()-0.5)*0.12;
+    const a=baseAng+spread;
+    particles.push({x:player.x+Math.cos(baseAng)*dist,y:player.y+Math.sin(baseAng)*dist,
+      vx:Math.cos(a)*2,vy:Math.sin(a)*2,
+      life:12,maxLife:12,color:i%2===0?'#ffeb3b':'#fffde7',sz:4+Math.random()*5,type:'star'});
+  }
+
+  // Start reload immediately after shot (20f = ~0.33s)
+  fx.shotgun.reloading=20;
+}
+
+// ── THUNDER STRIKE ──
+function spawnThunder(){
+  SFX.thunderStrike(); screenBlast(12);
+  const visible=zombies.filter(z=>!z.dead&&z.emerging===0&&sx(z.x)>60&&sx(z.x)<VW-60&&sy(z.y)>60&&sy(z.y)<VH-60);
+  let landX, landY;
+  if(visible.length>0 && Math.random()<0.75){
+    const target=visible[Math.floor(Math.random()*visible.length)];
+    landX=target.x+(Math.random()-0.5)*60; landY=target.y+(Math.random()-0.5)*40;
+  } else {
+    landX=cam.x+(Math.random()-0.5)*(VW/ZOOM*0.7);
+    landY=cam.y+(Math.random()-0.5)*(VH/ZOOM*0.7);
+  }
+  landX=Math.max(PITCH.x+20,Math.min(PITCH.x+PITCH.w-20,landX));
+  landY=Math.max(PITCH.y+20,Math.min(PITCH.y+PITCH.h-20,landY));
+  const worldTop=cam.y-(VH/2)/ZOOM-80;
+  // Bolt travels for 20 frames then hits ground — damage deferred to impact
+  thunderbolts.push({ x:landX, yStart:worldTop, yEnd:landY, life:60, maxLife:60,
+    landX, landY, impactDone:false });
+}
+
+// Called when bolt reaches ground — explode zombies in radius
+function thunderImpact(landX, landY){
+  screenBlast(14);
+  let killed=0;
+  for(const z of zombies){
+    if(z.dead||killed>=6) continue;
+    if(Math.hypot(z.x-landX,z.y-landY)<90){
+      z.hp=0; z.dead=true; z.deadAnim=38;
+      score+=z.pts; totalKills++;
+      if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+      const a=Math.atan2(z.y-landY,z.x-landX);
+      z.knockX=Math.cos(a)*5; z.knockY=Math.sin(a)*5; z.flyingCorpse=true;
+      goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.body);
+      scorePopup(z.x,z.y,z.pts);
+      particles.push({x:z.x+(Math.random()-0.5)*20,y:z.y+(Math.random()-0.5)*20,
+        vx:0,vy:0,life:720,maxLife:720,color:Math.random()<0.5?'#1a237e':'#212121',
+        sz:18+Math.random()*14,type:'puddle',gravity:0});
+      killed++;
+    }
+  }
+  // Burn marks
+  for(let i=0;i<6;i++) particles.push({x:landX+(Math.random()-0.5)*30,y:landY+(Math.random()-0.5)*20,
+    vx:0,vy:0,life:600,maxLife:600,color:i%2===0?'#0d47a1':'#212121',
+    sz:14+Math.random()*10,type:'puddle',gravity:0});
+}
+
+// ══════════════════════════════════════
+// UPDATE
+// ══════════════════════════════════════
+function update(){
+  frameCount++;
+  if(cam.shake>0) cam.shake *= 0.8;
+
+  // ── Powerup unlock at wave 2 ──
+  if(!powerupsUnlocked && wave >= 2){
+    powerupsUnlocked = true;
+    // Spawn 3 powerups simultaneously right away
+    spawnPowerup(); spawnPowerup(); spawnPowerup();
+    // Prime the extra-spawn timer
+    powerupExtraInterval = Math.round((4*60) + Math.random()*2*60); // 4–6s in frames
+    powerupExtraTimer = 0;
+  }
+
+  // ── Ongoing random powerup every ~5s (±1s) from wave 2 onward ──
+  if(powerupsUnlocked){
+    powerupExtraTimer++;
+    if(powerupExtraTimer >= powerupExtraInterval){
+      powerupExtraTimer = 0;
+      powerupExtraInterval = Math.round((4*60) + Math.random()*2*60); // re-randomise
+      spawnPowerup();
+    }
+  }
+
+  // ── Powerup lifetime + pickup check ──
+  for(let i=powerups.length-1;i>=0;i--){
+    const pu=powerups[i];
+    pu.life--;
+    if(pu.life<=0){ powerups.splice(i,1); continue; }
+    // Pickup: player touches square (world coords, 22px half-size)
+    const dx=player.x-pu.x, dy=player.y-pu.y;
+    if(Math.abs(dx)<22 && Math.abs(dy)<22){ activatePowerup(pu.def); powerups.splice(i,1); }
+  }
+
+  // ── Active effect timers ──
+  for(const k in fx){
+    if(fx[k].active){ fx[k].timer--; if(fx[k].timer<=0){ fx[k].active=false;
+      if(k==='fireBall'){ _ballFirePx=[]; fireTrails=[]; }
+      if(k==='shotgun'){ fx.shotgun.reloading=0; fx.shotgun.shots=3; fx.shotgun.muzzleFlash=0; }
+    }}
+  }
+  // ── Ricochet timer (30s) ──
+  if(ricochetCount>0 && ricochetTimer>0){
+    ricochetTimer--;
+    if(ricochetTimer<=0){ ricochetCount=0; ricochetTimer=0; }
+  }
+  // ── Orbit balls timer (20s) ──
+  if(orbitBalls.length>0 && orbitBallsTimer>0){
+    orbitBallsTimer--;
+    if(orbitBallsTimer<=0){ orbitBalls=[]; orbitBallsTimer=0; }
+  }
+
+  // ── Thunder periodic strikes ──
+  if(fx.thunder.active && frameCount>=fx.thunder.nextStrike){ spawnThunder(); fx.thunder.nextStrike=frameCount+70; }
+
+  // ── Thunderbolt lifetime + impact trigger ──
+  for(let i=thunderbolts.length-1;i>=0;i--){
+    const tb=thunderbolts[i];
+    tb.life--;
+    // Impact fires exactly when bolt tip reaches yEnd (at travelFrames=20 age)
+    const age=tb.maxLife-tb.life;
+    if(!tb.impactDone && age>=20){ tb.impactDone=true; thunderImpact(tb.landX,tb.landY); }
+    if(tb.life<=0) thunderbolts.splice(i,1);
+  }
+
+  // ── Wave break: block spawning for 2s on new wave ──
+  if(waveBreakTimer>0){ waveBreakTimer--; }
+
+  // ── Shotgun auto-fire ──
+  if(fx.shotgun.active){
+    if(fx.shotgun.muzzleFlash>0) fx.shotgun.muzzleFlash--;
+    if(fx.shotgun.reloading>0){
+      fx.shotgun.reloading--;
+      // Halfway through reload: play clack sound once
+      if(fx.shotgun.reloading===10) SFX.shotgunReload();
+      if(fx.shotgun.reloading<=0){ fx.shotgun.reloading=0; fireShotgun(); } // fire immediately after reload
+    }
+  }
+
+  // ── Zombie fire tick ──
+  for(const z of zombies){
+    if(!z.onFire||z.dead) continue;
+    z.fireTimer--;
+
+    // Frozen while on fire — override velocity to zero
+    if(z.fireFrozen){ z.vx=0; z.vy=0; z.knockX=0; z.knockY=0; }
+
+    // Update fire particles (slow simulation, runs every frame but moves slowly)
+    if(!z.fireParticles) z.fireParticles=[];
+    for(let i=z.fireParticles.length-1;i>=0;i--){
+      const fp=z.fireParticles[i];
+      fp.life--;
+      if(fp.life<=0){ z.fireParticles.splice(i,1); continue; }
+      // Slow wobble + rise
+      fp.phase+=0.055;
+      fp.ox += fp.vx + Math.sin(fp.phase)*0.18;
+      fp.oy -= fp.isSpark ? 0.55+Math.random()*0.4 : (fp.vy*-1); // sparks rise faster
+      if(fp.isSpark) fp.ox += (Math.random()-0.5)*0.9; // chaotic spark horizontal
+    }
+    // Replenish particles to maintain ~12 active
+    const needed = Math.max(0, 12 - z.fireParticles.length);
+    for(let i=0;i<needed;i++) z.fireParticles.push(makeFireParticle(z));
+
+    // Spread fire to nearby zombies (freeze them too)
+    if(frameCount%25===0){
+      for(const z2 of zombies){
+        if(z2===z||z2.dead||z2.onFire) continue;
+        const dx=z2.x-z.x,dy=z2.y-z.y;
+        if(Math.sqrt(dx*dx+dy*dy)<z.w+z2.w+10) igniteZombie(z2);
+      }
+    }
+
+    if(z.fireTimer<=0){
+      z.onFire=false; z.fireFrozen=false; z.fireParticles=[];
+      // Zombie bursts apart — gore explosion + ash overlay
+      z.hp=0; z.dead=true; z.deadAnim=38;
+      score+=z.pts; totalKills++;
+      if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+      scorePopup(z.x,z.y,z.pts);
+      SFX.explode(); screenBlast(5);
+      // Flying corpse burst outward
+      const burstA=Math.random()*Math.PI*2;
+      z.knockX=Math.cos(burstA)*5; z.knockY=Math.sin(burstA)*5;
+      z.flyingCorpse=true;
+      // Gore (smaller, charred — dark colors)
+      for(let i=0;i<20;i++){
+        const a=Math.random()*Math.PI*2, spd=(1+Math.random()*3)*0.5;
+        particles.push({x:z.x+(Math.random()-0.5)*z.w, y:z.y+(Math.random()-0.5)*z.h,
+          vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-0.5,
+          life:300, maxLife:300,
+          color:i%3===0?'#424242':i%3===1?'#212121':'#616161',
+          sz:3+Math.random()*5, type:'chunk', gravity:0.18,
+          bounceCount:0, landed:false,
+          rot:Math.random()*Math.PI*2, rotV:(Math.random()-0.5)*0.3,
+          groundY:z.y+8+Math.random()*12});
+      }
+      // Ash cloud puddles on ground
+      for(let i=0;i<12;i++){
+        const a=Math.random()*Math.PI*2, spd=0.3+Math.random()*1.2;
+        particles.push({x:z.x+(Math.random()-0.5)*z.w, y:z.y+(Math.random()-0.5)*z.h,
+          vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-0.3,
+          life:300, maxLife:300,
+          color:i%2===0?'#616161':'#9e9e9e',
+          sz:4+Math.random()*6, type:'puddle', gravity:0});
+      }
+    }
+  }
+
+  // ── Player ──
+  const SPD_BASE=1.57;
+  const SPD = samurai.active ? SPD_BASE*2.0 : SPD_BASE; // ×2 speed with samurai
+  let mx=0, my=0;
+  if(!megaDash.active){
+    if(joystickActive){ mx=(joystickDelta.x/55)*SPD; my=(joystickDelta.y/55)*SPD; }
+    if(keys['ArrowLeft']||keys['a']) mx-=SPD;
+    if(keys['ArrowRight']||keys['d']) mx+=SPD;
+    if(keys['ArrowUp']||keys['w'])   my-=SPD;
+    if(keys['ArrowDown']||keys['s']) my+=SPD;
+    // Slower knock decay when stunned so player slides far back
+    const knockDecay = player.stunned>50 ? 0.88 : 0.76;
+    player.knockX*=knockDecay; player.knockY*=knockDecay;
+    player.x+=mx+player.knockX; player.y+=my+player.knockY;
+    // Direction: only horizontal axis sets direction. Pure up/down = keep current dir (default right)
+    if(mx>0.1) player.dir=1;
+    else if(mx<-0.1) player.dir=-1;
+  } else {
+    // During mega dash: movement fully handled by updateMegaDash, reset physics
+    player.knockX=0; player.knockY=0; player.stunned=0; player.hitFlash=0;
+  }
+  if(player.hitFlash>0) player.hitFlash--;
+  if(player.stunned>0) player.stunned--;
+  if(player.kickAnim>0) player.kickAnim--;
+  player.x=Math.max(PITCH.x+player.w/2, Math.min(PITCH.x+PITCH.w-player.w/2, player.x));
+  // Allow player to enter goal area (30px beyond top/bottom line, within goal width)
+  const goalW2 = PITCH.w*0.28, goalX1p = PITCH.x+PITCH.w/2-goalW2/2, goalX2p = PITCH.x+PITCH.w/2+goalW2/2;
+  const inGoalX = player.x>=goalX1p && player.x<=goalX2p;
+  const minY = inGoalX ? PITCH.y-30 : PITCH.y+player.h/2;
+  const maxY = inGoalX ? PITCH.y+PITCH.h+30 : PITCH.y+PITCH.h-player.h/2;
+  player.y=Math.max(minY, Math.min(maxY, player.y));
+  const moving=Math.abs(mx)>0.05||Math.abs(my)>0.05||(megaDash.active&&megaDash.phase==='hop');
+  player.animFrame = moving ? Math.floor(frameCount/3)%4 : 0; // faster anim during hop
+
+  // ── MegaDash update (after player position set) ──
+  updateMegaDash();
+
+  // ── Samurai update ──
+  updateSamurai();
+
+  // Reset lowHpUsed when player heals back above 30%
+  if(megaDash.lowHpUsed && player.hp>30) megaDash.lowHpUsed=false;
+
+  // ── Continuous spawner ──
+  targetCount = 8 + Math.floor(totalKills * 0.35) + wave * 3;
+  const alive = zombies.filter(z=>!z.dead).length;
+  spawnTimer++;
+  // Block spawning during wave break (2s pause between waves)
+  const spawnRate = (alive < targetCount && waveBreakTimer<=0) ? Math.max(1, 8 - Math.floor(totalKills/20)) : 0;
+  if(spawnRate>0 && spawnTimer % spawnRate === 0){
+    spawnZombie(false);
+  }
+
+  // ── Ball (main) ──
+  ball.footSpin += 0.12; // always spinning at feet
+
+  // Cooldown decreases with kills
+  const maxCD2=60, minCD2=10, killB2=Math.min(100,Math.floor(totalKills/5)*5);
+  const currentMaxCD2 = Math.max(minCD2, maxCD2-killB2);
+
+  if(!ball.active){
+    ball.bounce += 0.18;
+    const ballBounceY = Math.abs(Math.sin(ball.bounce))*6;
+    ball.x = player.x + player.dir*8;
+    ball.y = player.y + player.h/2 - ball.r - ballBounceY;
+    ball.spin = ball.footSpin;
+    if(player.stunned<=0) shootCooldown--;
+    if(shootCooldown<=0 && player.stunned<=0){
+      const t=nearestVisible();
+      if(t){
+        const dx=t.x-ball.x, dy=t.y-ball.y, d=Math.sqrt(dx*dx+dy*dy);
+        ball.vx=(dx/d)*4.5; ball.vy=(dy/d)*4.5;
+        ball.active=true; ball.returning=false;
+        ball.z=0; ball.zv=3.5;
+        ball.ricochetsLeft=ricochetCount;
+        ball.hitZombies=[];
+        player.kickAnim=18;
+        SFX.kick();
+      }
+    }
+  } else {
+    ball.x+=ball.vx; ball.y+=ball.vy;
+    ball.spin+=0.32;
+    if(ball.z>0||ball.zv>0){ ball.z+=ball.zv; ball.zv-=0.22; if(ball.z<0){ball.z=0;ball.zv=0;} }
+    // Fire trail — spawn one segment every 2 frames, each with its own pixel state
+    if(fx.fireBall.active && !ball.returning && frameCount%2===0){
+      // Each segment gets an array of pixel blocks + sparks, all born at this moment
+      const seg = { x:ball.x, y:ball.y, life:120, maxLife:120, dead:false, pixels:[] };
+      // 4-7 main pixel blocks, varied sizes
+      const nPx = 4+Math.floor(Math.random()*4);
+      for(let i=0;i<nPx;i++){
+        seg.pixels.push({
+          type:'block',
+          ox:(Math.random()-0.5)*10,  // x offset from seg center (world units)
+          oy:-(Math.random()*14),     // y offset upward
+          sz:5+Math.floor(Math.random()*7), // 5–11px base size
+          col:Math.random()<0.5?'#ff6d00':Math.random()<0.6?'#ff9800':'#ffeb3b',
+          birthLife:120,              // remember birth life for shrink ratio
+        });
+      }
+      // 3-4 sparks, chaotic upward
+      const nSp = 3+Math.floor(Math.random()*2);
+      for(let i=0;i<nSp;i++){
+        seg.pixels.push({
+          type:'spark',
+          ox:(Math.random()-0.5)*14,
+          oy:-(8+Math.random()*16),
+          vox:(Math.random()-0.5)*0.25,  // slow horizontal drift per frame
+          voy:-(0.3+Math.random()*0.4),  // upward drift per frame
+          sz:2+Math.floor(Math.random()*3), // 2–4px
+          col:Math.random()<0.6?'#ffeb3b':'#fff9c4',
+          birthLife:120,
+        });
+      }
+      fireTrails.push(seg);
+    }
+    if(!ball.returning){
+      let didBounce=false;
+      for(const z of zombies){
+        if(z.dead||z.emerging>0) continue;
+        if(ball.hitZombies&&ball.hitZombies.includes(z)) continue;
+        const dx=ball.x-z.x, dy=ball.y-z.y, d=Math.sqrt(dx*dx+dy*dy);
+        if(d<z.w/2+ball.r){
+          if(ball.hitZombies) ball.hitZombies.push(z);
+          if(fx.fireBall.active){
+            igniteZombie(z); SFX.hit();
+            if(ball.ricochetsLeft>0){
+              const next=zombies.filter(z2=>!z2.dead&&!z2.onFire&&z2.emerging===0&&!(ball.hitZombies&&ball.hitZombies.includes(z2)))
+                .sort((a2,b2)=>Math.hypot(a2.x-z.x,a2.y-z.y)-Math.hypot(b2.x-z.x,b2.y-z.y))[0];
+              if(next){ ball.ricochetsLeft--; const nx=next.x-ball.x,ny=next.y-ball.y,nd2=Math.sqrt(nx*nx+ny*ny)||1;
+                ball.vx=(nx/nd2)*4.5; ball.vy=(ny/nd2)*4.5; ball.z=0; ball.zv=2; didBounce=true; break; }
+            }
+            ball.returning=true;
+            const ang=Math.atan2(player.y-ball.y,player.x-ball.x);
+            ball.vx=Math.cos(ang)*4; ball.vy=Math.sin(ang)*4; ball.z=0; ball.zv=2; break;
+          }
+          z.hp--; z.hitFlash=10; blood(z.x,z.y,14);
+          const nd=d||1; z.knockX=(dx/nd)*5; z.knockY=(dy/nd)*5;
+          SFX.hit();
+          if(z.hp<=0){
+            z.dead=true; z.deadAnim=38; score+=z.pts; totalKills++;
+            if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+            const bdx=ball.vx/(Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy)||1);
+            const bdy=ball.vy/(Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy)||1);
+            const bf=7+Math.random()*3; // was 14+random*6, halved
+            z.knockX=bdx*bf; z.knockY=bdy*bf; z.flyingCorpse=true;
+            goreExplosion(z.x,z.y,bdx,bdy,z.body); scorePopup(z.x,z.y,z.pts); SFX.explode(); screenBlast(6);
+            if(ball.ricochetsLeft>0){
+              const next=zombies.filter(z2=>!z2.dead&&!z2.onFire&&z2.emerging===0&&!(ball.hitZombies&&ball.hitZombies.includes(z2)))
+                .sort((a2,b2)=>Math.hypot(a2.x-z.x,a2.y-z.y)-Math.hypot(b2.x-z.x,b2.y-z.y))[0];
+              if(next){ ball.ricochetsLeft--; const nx=next.x-ball.x,ny=next.y-ball.y,nd2=Math.sqrt(nx*nx+ny*ny)||1;
+                ball.vx=(nx/nd2)*4.5; ball.vy=(ny/nd2)*4.5; ball.z=0; ball.zv=2; didBounce=true; break; }
+            }
+          } else {
+            if(z.id==='big'||z.id==='tank') SFX.bigHit(); else SFX.growl();
+          }
+          if(!didBounce){
+            ball.returning=true;
+            const ang=Math.atan2(player.y-ball.y,player.x-ball.x);
+            ball.vx=Math.cos(ang)*4; ball.vy=Math.sin(ang)*4; ball.z=0; ball.zv=2;
+          }
+          break;
+        }
+      }
+      if(!didBounce&&!ball.returning&&(ball.x<PITCH.x||ball.x>PITCH.x+PITCH.w||ball.y<PITCH.y||ball.y>PITCH.y+PITCH.h)){
+        ball.returning=true;
+        const ang=Math.atan2(player.y-ball.y,player.x-ball.x);
+        ball.vx=Math.cos(ang)*4; ball.vy=Math.sin(ang)*4;
+      }
+    } else {
+      const retX=player.x+player.dir*8, retY=player.y+player.h/2-ball.r;
+      const dx=retX-ball.x, dy=retY-ball.y, d=Math.sqrt(dx*dx+dy*dy);
+      if(d<14){ ball.active=false; ball.returning=false; ball.footSpin=ball.spin; shootCooldown=currentMaxCD2; }
+      else{ ball.vx=(dx/d)*4.25; ball.vy=(dy/d)*4.25; }
+    }
+  }
+
+  // ── Extra balls update ──
+  // Foot positions offsets for extra balls (fixed relative to player, not direction-dependent)
+  const EPOS=[{ox:-10,oy:0},{ox:0,oy:-14},{ox:0,oy:14}];
+  for(let bi=0;bi<extraBalls.length;bi++){
+    const eb=extraBalls[bi];
+    const epos=EPOS[bi];
+    eb.bounce+=0.18;
+    const ebBY=Math.abs(Math.sin(eb.bounce))*5;
+    if(!eb.active){
+      eb.x=player.x+epos.ox;
+      eb.y=player.y+epos.oy+player.h/2-eb.r-ebBY;
+      eb.spin=eb.footSpin;
+      eb.shootCooldown--;
+      if(eb.shootCooldown<=0 && player.stunned<=0){
+        const t2=nearestVisible();
+        if(t2){
+          const dx=t2.x-eb.x,dy=t2.y-eb.y,d=Math.sqrt(dx*dx+dy*dy)||1;
+          eb.vx=(dx/d)*4.5; eb.vy=(dy/d)*4.5;
+          eb.active=true; eb.returning=false; eb.z=0; eb.zv=3;
+          eb.ricochetsLeft=ricochetCount; eb.hitZombies=[];
+        }
+      }
+    } else {
+      eb.x+=eb.vx; eb.y+=eb.vy; eb.spin+=0.32;
+      if(eb.z>0||eb.zv>0){ eb.z+=eb.zv; eb.zv-=0.22; if(eb.z<0){eb.z=0;eb.zv=0;} }
+      if(fx.fireBall.active && !eb.returning && frameCount%2===0){
+        const seg={x:eb.x,y:eb.y,life:120,maxLife:120,dead:false,pixels:[]};
+        const nPx=4+Math.floor(Math.random()*4);
+        for(let i=0;i<nPx;i++) seg.pixels.push({type:'block',ox:(Math.random()-0.5)*10,oy:-(Math.random()*14),sz:5+Math.floor(Math.random()*7),col:Math.random()<0.5?'#ff6d00':Math.random()<0.6?'#ff9800':'#ffeb3b',birthLife:120});
+        const nSp=3+Math.floor(Math.random()*2);
+        for(let i=0;i<nSp;i++) seg.pixels.push({type:'spark',ox:(Math.random()-0.5)*14,oy:-(8+Math.random()*16),vox:(Math.random()-0.5)*0.25,voy:-(0.3+Math.random()*0.4),sz:2+Math.floor(Math.random()*3),col:Math.random()<0.6?'#ffeb3b':'#fff9c4',birthLife:120});
+        fireTrails.push(seg);
+      }
+      if(!eb.returning){
+        for(const z of zombies){
+          if(z.dead||z.emerging>0) continue;
+          if(eb.hitZombies&&eb.hitZombies.includes(z)) continue;
+          const dx=eb.x-z.x,dy=eb.y-z.y,d=Math.sqrt(dx*dx+dy*dy);
+          if(d<z.w/2+eb.r){
+            if(eb.hitZombies) eb.hitZombies.push(z);
+            if(fx.fireBall.active){ igniteZombie(z); SFX.hit(); }
+            else {
+              z.hp--; z.hitFlash=10; blood(z.x,z.y,10);
+              if(z.hp<=0){
+                z.dead=true; z.deadAnim=38; score+=z.pts; totalKills++;
+                if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+                const bdx=eb.vx/(Math.sqrt(eb.vx*eb.vx+eb.vy*eb.vy)||1);
+                const bdy=eb.vy/(Math.sqrt(eb.vx*eb.vx+eb.vy*eb.vy)||1);
+                z.knockX=bdx*7; z.knockY=bdy*7; z.flyingCorpse=true;
+                goreExplosion(z.x,z.y,bdx,bdy,z.body); scorePopup(z.x,z.y,z.pts); SFX.explode();
+              } else SFX.hit();
+            }
+            // ricochet for extra ball
+            if(eb.ricochetsLeft>0){
+              const next=zombies.filter(z2=>!z2.dead&&!z2.onFire&&z2.emerging===0&&!(eb.hitZombies&&eb.hitZombies.includes(z2)))
+                .sort((a2,b2)=>Math.hypot(a2.x-z.x,a2.y-z.y)-Math.hypot(b2.x-z.x,b2.y-z.y))[0];
+              if(next){ eb.ricochetsLeft--; const nx=next.x-eb.x,ny=next.y-eb.y,nd2=Math.sqrt(nx*nx+ny*ny)||1;
+                eb.vx=(nx/nd2)*4.5; eb.vy=(ny/nd2)*4.5; eb.z=0; eb.zv=2; break; }
+            }
+            eb.returning=true;
+            const ang=Math.atan2(player.y-eb.y,player.x-eb.x);
+            eb.vx=Math.cos(ang)*4; eb.vy=Math.sin(ang)*4; eb.z=0; eb.zv=2; break;
+          }
+        }
+        if(!eb.returning&&(eb.x<PITCH.x||eb.x>PITCH.x+PITCH.w||eb.y<PITCH.y||eb.y>PITCH.y+PITCH.h)){
+          eb.returning=true;
+          const ang=Math.atan2(player.y-eb.y,player.x-eb.x);
+          eb.vx=Math.cos(ang)*4; eb.vy=Math.sin(ang)*4;
+        }
+      } else {
+        const rx=player.x+epos.ox, ry=player.y+epos.oy+player.h/2-eb.r;
+        const dx=rx-eb.x,dy=ry-eb.y,d=Math.sqrt(dx*dx+dy*dy);
+        if(d<14){ eb.active=false; eb.returning=false; eb.footSpin=eb.spin; eb.shootCooldown=40+bi*15; }
+        else{ eb.vx=(dx/d)*4.25; eb.vy=(dy/d)*4.25; }
+      }
+    }
+  }
+
+  // ── Orbit balls (x6balls powerup) ──
+  updateOrbitBalls();
+
+  // ── Fire trail tick: age segments, move sparks, ignite zombies, char on death ──
+  for(let i=fireTrails.length-1;i>=0;i--){
+    const ft=fireTrails[i];
+    ft.life--;
+    // Update spark positions each frame
+    if(ft.pixels){
+      for(const p of ft.pixels){
+        if(p.type==='spark'){
+          p.ox += p.vox + (Math.random()-0.5)*0.18; // chaotic wobble
+          p.oy += p.voy;                             // drift upward
+          p.vox *= 0.95;
+        }
+      }
+    }
+    if(ft.life<=0){
+      // Leave a small black char mark for 1s (60f)
+      if(!ft.dead){
+        ft.dead=true;
+        particles.push({x:ft.x,y:ft.y,vx:0,vy:0,life:60,maxLife:60,
+          color:'#212121',sz:6+Math.random()*5,type:'puddle',gravity:0});
+      }
+      fireTrails.splice(i,1); continue;
+    }
+    // Ignite zombies every 4 frames
+    if(frameCount%4===0){
+      for(const z of zombies){
+        if(z.dead||z.onFire||z.emerging>0) continue;
+        if(Math.hypot(z.x-ft.x,z.y-ft.y)<z.w/2+14) igniteZombie(z);
+      }
+    }
+  }
+
+  // ── Zombies — move + collisions ──
+  const aliveZ = zombies.filter(z=>!z.dead);
+
+  // STEP 1: Move all zombies
+  for(const z of zombies){
+    if(z.dead){
+      z.deadAnim--;
+      if(z.flyingCorpse){
+        // Apply gravity and friction to flying corpse
+        z.knockX*=0.88; z.knockY*=0.88;
+        z.knockY+=0.15; // gravity drag
+        z.x+=z.knockX; z.y+=z.knockY;
+        // Clamp to pitch
+        z.x=Math.max(PITCH.x, Math.min(PITCH.x+PITCH.w, z.x));
+        z.y=Math.max(PITCH.y, Math.min(PITCH.y+PITCH.h, z.y));
+        // Spawn blood trail along flight path
+        if(z.deadAnim%2===0 && Math.sqrt(z.knockX*z.knockX+z.knockY*z.knockY)>0.8){
+          particles.push({x:z.x+(Math.random()-0.5)*z.w, y:z.y+(Math.random()-0.5)*z.h,
+            vx:(Math.random()-0.5)*0.8, vy:(Math.random()-0.5)*0.8,
+            life:660, maxLife:660,
+            color:Math.random()<0.6?C.blood:'#5d0000',
+            sz:3+Math.random()*4, type:'puddle', gravity:0});
+        }
+      }
+      continue;
+    }
+    const dx=player.x-z.x, dy=player.y-z.y, d=Math.sqrt(dx*dx+dy*dy)||1;
+
+    // Sprinters weave slightly
+    let weavX=0, weavY=0;
+    // no weave for fast zombies
+
+    // Emerging: zombie is digging out, can't move yet
+    if(z.emerging>0){ z.emerging--; z.vx=0; z.vy=0; continue; } // still digging
+    // Frozen by fire — stays immobile
+    if(z.fireFrozen){ z.vx=0; z.vy=0; z.knockX=0; z.knockY=0; continue; }
+    // ── Speed phases: 5 phases based on totalKills, hard cap at phase 5 ──
+    // Phase thresholds (kills needed to reach each phase)
+    // Phase 1: 0–19  → ×1.0  (base)
+    // Phase 2: 20–49 → ×1.2
+    // Phase 3: 50–99 → ×1.45
+    // Phase 4: 100–179 → ×1.70
+    // Phase 5: 180+  → ×2.0  (hard cap, never faster)
+    const killPhaseBoost = totalKills>=180 ? 2.0
+                         : totalKills>=100 ? 1.70
+                         : totalKills>=50  ? 1.45
+                         : totalKills>=20  ? 1.20
+                         : 1.0;
+    // Only normal zombies scale — others keep their base speed (but benefit from wave purge mult)
+    const killBoost = (z.id==='normal') ? killPhaseBoost : 1;
+    const globalMult = zombieSpeedMult * (z.speedVariant||1);
+    const speedScale = killBoost * globalMult;
+    const slowScale = fx.slowMo.active ? 0.15 : 1;
+    z.vx=(dx/d)*z.spd*speedScale*slowScale+weavX; z.vy=(dy/d)*z.spd*speedScale*slowScale+weavY;
+    z.dir = (player.x > z.x) ? 1 : -1; // face player
+    z.knockX*=0.82; z.knockY*=0.82;
+    z.x+=z.vx+z.knockX; z.y+=z.vy+z.knockY;
+    if(z.hitFlash>0) z.hitFlash--;
+
+    z.x=Math.max(PITCH.x+z.w/2, Math.min(PITCH.x+PITCH.w-z.w/2, z.x));
+    z.y=Math.max(PITCH.y+z.h/2, Math.min(PITCH.y+PITCH.h-z.h/2, z.y));
+    z.animFrame=Math.floor(frameCount/(10))%2;
+
+    // Growl (on-screen only)
+    if(frameCount>=z.nextGrowl){
+      const scx=sx(z.x),scy=sy(z.y);
+      const onScreen=scx>0&&scx<VW&&scy>0&&scy<VH;
+      if(onScreen){
+        if(z.id==='fast'){
+          // Short running grunt every ~60 frames (1s)
+          z.nextGrowl=frameCount+55+Math.floor(Math.random()*15);
+          SFX.runGrowl();
+        } else {
+          // Normal random growl
+          z.nextGrowl=frameCount+Math.floor(Math.random()*250+90);
+          SFX.growl();
+        }
+      } else {
+        z.nextGrowl=frameCount+60;
+      }
+    }
+
+    // Attack player
+    if(d<z.w/2+player.w/2+3){
+      if(megaDash.active) continue; // invincible during mega dash
+      if(samurai.active) continue;  // invincible during samurai (sword kills on touch)
+      if(invincibleMode) continue;  // invincible mode: freeze HP
+      const dmg = z.id==='big'?0.3:0.22;
+      player.hp -= dmg;
+      if(frameCount%20===0){
+        player.hitFlash=18;
+        player.stunned=62;
+        const kForce = z.id==='big'?7:5.5;
+        player.knockX = (player.x-z.x)/d * kForce;
+        player.knockY = (player.y-z.y)/d * kForce;
+        player.hitDirX = (player.x-z.x)/d;
+        player.hitDirY = (player.y-z.y)/d;
+        SFX.playerScream();
+        screenBlast(14);
+      }
+    }
+  }
+
+  // STEP 2: Zombie-zombie collisions
+  // Only check pairs within a reasonable radius to keep perf good
+  for(let i=0;i<aliveZ.length;i++){
+    const a = aliveZ[i];
+    if(a.dead) continue;
+    for(let j=i+1;j<aliveZ.length;j++){
+      const b = aliveZ[j];
+      if(b.dead) continue;
+
+      const dx = b.x-a.x, dy = b.y-a.y;
+      const dist = Math.sqrt(dx*dx+dy*dy)||0.01;
+      const minDist = (a.w+b.w)*0.5 + 1; // combined half-widths + 1px gap
+
+      if(dist < minDist){
+        const nx = dx/dist, ny = dy/dist;
+        const overlap = minDist - dist;
+
+        // Check if either zombie is being knocked back hard (ball hit)
+        const aKnock = Math.sqrt(a.knockX*a.knockX+a.knockY*a.knockY);
+        const bKnock = Math.sqrt(b.knockX*b.knockX+b.knockY*b.knockY);
+
+        if(aKnock > 2.0){
+          // A is flying — chain push B strongly
+          const chainForce = Math.min(aKnock * 0.65, 7);
+          b.knockX += (a.knockX/aKnock) * chainForce;
+          b.knockY += (a.knockY/aKnock) * chainForce;
+          b.hitFlash = 6;
+          // A loses some momentum (energy transfer)
+          a.knockX *= 0.75; a.knockY *= 0.75;
+        } else if(bKnock > 2.0){
+          // B is flying — chain push A strongly
+          const chainForce = Math.min(bKnock * 0.65, 7);
+          a.knockX += (b.knockX/bKnock) * chainForce * -1;
+          a.knockY += (b.knockY/bKnock) * chainForce * -1;
+          a.hitFlash = 6;
+          b.knockX *= 0.75; b.knockY *= 0.75;
+        } else {
+          // Normal walking proximity — soft gentle separation only
+          // Use a small fraction so zombies can still crowd tightly
+          const sep = overlap * 0.18;
+          a.x -= nx * sep; a.y -= ny * sep;
+          b.x += nx * sep; b.y += ny * sep;
+        }
+      }
+    }
+  }
+
+  // Fast zombie sfx when many on screen
+  const fastOnScreen = zombies.filter(z=>!z.dead&&(z.id==='fast')&&sx(z.x)>0&&sx(z.x)<VW).length;
+  if(fastOnScreen>0 && frameCount%60===0) SFX.fastZombie();
+
+  zombies = zombies.filter(z=>!z.dead||z.deadAnim>0);
+
+  // ── Wave progression (wave = kill milestone) ──
+  const newWave = 1 + Math.floor(totalKills/20);
+  if(newWave > wave){
+    wave = newWave;
+    waveAnnounce = 160;
+    waveBreakTimer = 120; // 2s spawn freeze
+    SFX.waveUp();
+    player.hp = Math.min(player.maxHp, player.hp+10);
+
+    // Every 5th wave: purge ALL zombies with explosions, keep speed
+    if(wave % 5 === 0){
+      // Capture speed phase before purge — persists for next wave
+      zombieSpeedMult = totalKills>=180 ? 2.0
+                      : totalKills>=100 ? 1.70
+                      : totalKills>=50  ? 1.45
+                      : totalKills>=20  ? 1.20
+                      : 1.0;
+      // Explode all alive zombies
+      for(const z of zombies){
+        if(z.dead) continue;
+        z.dead = true; z.deadAnim = 38;
+        score += z.pts; totalKills++;
+        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+        const a = Math.random()*Math.PI*2;
+        z.knockX = Math.cos(a)*12; z.knockY = Math.sin(a)*12;
+        z.flyingCorpse = true;
+        goreExplosion(z.x, z.y, Math.cos(a), Math.sin(a), z.body);
+        scorePopup(z.x, z.y, z.pts);
+      }
+      SFX.bombExplode(); screenBlast(22);
+      // Flash message handled by waveAnnounce
+    }
+  }
+
+  // ── Particles ──
+  particles.forEach(p=>{
+    if(p.type==='puddle'){
+      // Puddles don't move, just age
+      p.life--;
+      return;
+    }
+    if(p.type==='chunk'||p.type==='dirt'){
+      if(p.landed){
+        // Chunk is on ground — just age, no movement
+        p.rotV*=0.85;
+        if(p.rot!=null) p.rot+=p.rotV||0;
+        p.life--;
+        return;
+      }
+      // In flight: apply gravity
+      p.vy+=p.gravity||0.18;
+      p.x+=p.vx; p.y+=p.vy;
+      p.vx*=0.92; // light air drag
+      if(p.rot!=null) p.rot+=p.rotV||0;
+      // Bounce when hitting "ground" (groundY)
+      if(p.y >= (p.groundY||p.y+1) && p.bounceCount<2){
+        p.y = p.groundY||p.y;
+        p.vy = -p.vy * (0.35 - p.bounceCount*0.12); // lose energy each bounce
+        p.vx *= 0.6;
+        p.rotV *= 0.5;
+        p.bounceCount++;
+        // Organic thud SFX on first land (only for gore chunks, not dirt)
+        if(p.bounceCount===1 && p.type==='chunk') SFX.chunkLand();
+      } else if(p.y >= (p.groundY||p.y+1)){
+        // Done bouncing — stick to ground
+        p.y = p.groundY||p.y;
+        p.vx=0; p.vy=0; p.landed=true;
+      }
+      p.life--;
+      return;
+    }
+    // Default: blood splatter etc
+    p.x+=p.vx; p.y+=p.vy;
+    if(p.gravity) p.vy+=p.gravity;
+    p.vx*=0.87; p.vy*=0.87;
+    if(p.rot!=null) p.rot+=p.rotV||0;
+    p.life--;
+  });
+  particles=particles.filter(p=>p.life>0);
+
+  updateCamera();
+  updateBiome();
+
+  // ── Obstacle collisions (player + zombies, NOT balls) ──
+  if(biomeObstacles.length>0){
+    checkObstacleCollision(player, player.w/2, player.h/2);
+    for(const z of zombies){
+      if(!z.dead && z.emerging===0) checkObstacleCollision(z, z.w/2, z.h/2);
+    }
+  }
+
+  // ── One Up score milestone check ──
+  while(score >= oneUpScoreThreshold){
+    oneUpCount++;
+    oneUpScoreThreshold += 10000;
+    oneUpAnim = 120; // show earn animation for 2s
+    sfxOneUpEarn();
+    cam.shake=6;
+    // Visual sparkle burst
+    for(let i=0;i<24;i++){
+      const a=(i/24)*Math.PI*2;
+      particles.push({x:player.x,y:player.y,vx:Math.cos(a)*4,vy:Math.sin(a)*4,
+        life:40,maxLife:40,color:i%2===0?'#e8ff00':'#ffffff',sz:4+Math.random()*4,type:'star'});
+    }
+  }
+  if(oneUpAnim>0) oneUpAnim--;
+
+  // ── Update One Up FX ──
+  updateOneUpFX();
+
+  if(player.hp<=0){
+    if(oneUpCount>0 && oneUpFX.phase===0){
+      // Trigger 1UP instead of game over
+      player.hp=0;
+      triggerOneUp();
+    } else if(oneUpFX.phase===0){
+      player.hp=0; gameOver=true;
+    }
+  }
+  waveAnnounce--;
+}
+
+// ══════════════════════════════════════
+// DRAW
+// ══════════════════════════════════════
+function pr(x,y,w,h,c){ ctx.fillStyle=c; ctx.fillRect(Math.round(x),Math.round(y),w,h); }
+
+function drawPitch(){
+  const bc = getCurrentBiomeColors();
+  const stripes=22, sw=PITCH.w/stripes;
+  const pitchScreenH = Math.round(PITCH.h * ZOOM); // zoomed height
+  for(let i=0;i<stripes;i++){
+    const bx=sx(PITCH.x+i*sw);
+    const bw=Math.ceil(sw*ZOOM)+2;
+    if(bx>VW||bx+bw<0)continue;
+    ctx.fillStyle=i%2===0?bc.g1:bc.g2;
+    ctx.fillRect(Math.round(bx), Math.round(sy(PITCH.y)), bw, pitchScreenH);
+  }
+  ctx.strokeStyle=bc.line; ctx.lineWidth=2;
+  const px=x=>sx(x), py=y=>sy(y);
+  const pw=w=>Math.round(w*ZOOM), ph=h=>Math.round(h*ZOOM);
+
+  // Pitch dimensions
+  const cx  = PITCH.x+PITCH.w/2;
+  const midY= PITCH.y+PITCH.h/2;
+
+  // Goal width = 1/4 of pitch width, centered
+  const goalW = Math.round(PITCH.w*0.28);
+  const goalX1 = cx - goalW/2;
+  const goalX2 = cx + goalW/2;
+
+  // ── Outer border — draw as 4 separate lines so we can open goal mouths ──
+  // Left side (full height)
+  ctx.beginPath();ctx.moveTo(px(PITCH.x),py(PITCH.y));ctx.lineTo(px(PITCH.x),py(PITCH.y+PITCH.h));ctx.stroke();
+  // Right side (full height)
+  ctx.beginPath();ctx.moveTo(px(PITCH.x+PITCH.w),py(PITCH.y));ctx.lineTo(px(PITCH.x+PITCH.w),py(PITCH.y+PITCH.h));ctx.stroke();
+  // Top: left segment + right segment (gap = goal mouth)
+  ctx.beginPath();ctx.moveTo(px(PITCH.x),py(PITCH.y));ctx.lineTo(px(goalX1),py(PITCH.y));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(px(goalX2),py(PITCH.y));ctx.lineTo(px(PITCH.x+PITCH.w),py(PITCH.y));ctx.stroke();
+  // Bottom: same
+  ctx.beginPath();ctx.moveTo(px(PITCH.x),py(PITCH.y+PITCH.h));ctx.lineTo(px(goalX1),py(PITCH.y+PITCH.h));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(px(goalX2),py(PITCH.y+PITCH.h));ctx.lineTo(px(PITCH.x+PITCH.w),py(PITCH.y+PITCH.h));ctx.stroke();
+
+  // ── Goal posts ── (small vertical lines outside pitch at goal mouth)
+  ctx.strokeStyle='#ffffff'; ctx.lineWidth=3;
+  const postH = ph(30);
+  // Top goal
+  ctx.strokeRect(px(goalX1)-2, py(PITCH.y)-postH, 3, postH);
+  ctx.strokeRect(px(goalX2)-1, py(PITCH.y)-postH, 3, postH);
+  ctx.beginPath();ctx.moveTo(px(goalX1)-1,py(PITCH.y)-postH);ctx.lineTo(px(goalX2)+1,py(PITCH.y)-postH);ctx.stroke();
+  // Bottom goal
+  ctx.strokeRect(px(goalX1)-2, py(PITCH.y+PITCH.h), 3, postH);
+  ctx.strokeRect(px(goalX2)-1, py(PITCH.y+PITCH.h), 3, postH);
+  ctx.beginPath();ctx.moveTo(px(goalX1)-1,py(PITCH.y+PITCH.h)+postH);ctx.lineTo(px(goalX2)+1,py(PITCH.y+PITCH.h)+postH);ctx.stroke();
+
+  ctx.strokeStyle=bc.line; ctx.lineWidth=2;
+
+  // ── Halfway line ──
+  ctx.beginPath();ctx.moveTo(px(PITCH.x),py(midY));ctx.lineTo(px(PITCH.x+PITCH.w),py(midY));ctx.stroke();
+
+  // ── Center circle — scaled to pitch width ──
+  const circleR = PITCH.w * 0.12;
+  ctx.beginPath();ctx.arc(px(cx),py(midY),circleR*ZOOM,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle=bc.line;ctx.beginPath();ctx.arc(px(cx),py(midY),4*ZOOM,0,Math.PI*2);ctx.fill();
+
+  // ── Penalty areas (proportional to pitch) ──
+  const paW=Math.round(PITCH.w*0.55), paH=Math.round(PITCH.h*0.12);
+  const gaH=Math.round(PITCH.h*0.05);
+  ctx.strokeRect(px(cx-paW/2), py(PITCH.y), pw(paW), ph(paH));
+  ctx.strokeRect(px(cx-goalW/2), py(PITCH.y), pw(goalW), ph(gaH));
+  ctx.strokeRect(px(cx-paW/2), py(PITCH.y+PITCH.h-paH), pw(paW), ph(paH));
+  ctx.strokeRect(px(cx-goalW/2), py(PITCH.y+PITCH.h-gaH), pw(goalW), ph(gaH));
+
+  // ── Penalty spots ──
+  const penDist = Math.round(PITCH.h*0.1);
+  ctx.fillStyle=bc.line;
+  ctx.beginPath();ctx.arc(px(cx),py(PITCH.y+penDist),4*ZOOM,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(px(cx),py(PITCH.y+PITCH.h-penDist),4*ZOOM,0,Math.PI*2);ctx.fill();
+
+  // ── Corner arcs ──
+  const cr=18*ZOOM;
+  [[PITCH.x,PITCH.y,0,Math.PI/2],[PITCH.x+PITCH.w,PITCH.y,Math.PI/2,Math.PI],
+   [PITCH.x+PITCH.w,PITCH.y+PITCH.h,Math.PI,1.5*Math.PI],[PITCH.x,PITCH.y+PITCH.h,1.5*Math.PI,Math.PI*2]
+  ].forEach(([cx2,cy2,s2,e])=>{ctx.beginPath();ctx.arc(px(cx2),py(cy2),cr,s2,e);ctx.stroke();});
+}
+
+function drawStands(){
+  const bc = getCurrentBiomeColors();
+  ctx.fillStyle = bc.stand;
+  ctx.fillRect(0,0,VW,VH);
+}
+
+function drawPlayer(){
+  const x=Math.round(sx(player.x)), y=Math.round(sy(player.y));
+  const d=player.dir, leg=player.animFrame;
+  const fl=player.hitFlash>0&&frameCount%3<2;
+
+  // ── Shadow ──
+  ctx.fillStyle='rgba(0,0,0,0.22)';
+  ctx.beginPath();ctx.ellipse(x,y+13,10,3,0,0,Math.PI*2);ctx.fill();
+
+  // ── Leg animation offsets ──
+  // leg 0=idle, 1=step fwd, 2=idle, 3=step back
+  const legFwd  = (leg===1)?3:(leg===3)?-3:0;  // front leg Y offset
+  const legBack = (leg===1)?-2:(leg===3)?2:0;   // back leg Y offset
+
+  // ── KICK ANIMATION — big visible leg swing ──
+  if(player.kickAnim>0){
+    // Phase 0→1→0 over 35 frames: peak at frame 25 (hold), snap back fast
+    const kt = player.kickAnim/18;
+    // Slow rise, hold at peak, fast snap back
+    let kickPhase;
+    if(player.kickAnim > 6){
+      kickPhase = Math.min(1, (18-player.kickAnim)/5); // rises over first 5f
+    } else {
+      kickPhase = player.kickAnim/6; // snaps back over last 6f
+    }
+
+    const d2 = player.dir;
+    // Upper leg: raises forward from hip
+    const hipX = x + d2*3;
+    const hipY = y + 5;
+    const thighLen = 12;
+    // Thigh swings forward — angle goes from 90° (down) to 30° (forward+up)
+    const thighAngle = (Math.PI/2) - kickPhase*(Math.PI*0.55);
+    const kneeX = Math.round(hipX + Math.cos(thighAngle)*thighLen * d2);
+    const kneeY = Math.round(hipY + Math.sin(thighAngle)*thighLen);
+
+    // Draw thigh (upper leg) as thick line
+    ctx.strokeStyle='#1976d2'; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.moveTo(hipX, hipY); ctx.lineTo(kneeX, kneeY); ctx.stroke();
+
+    // Shin swings even more forward at peak
+    const shinLen = 11;
+    const shinAngle = thighAngle - kickPhase*(Math.PI*0.45);
+    const footX = Math.round(kneeX + Math.cos(shinAngle)*shinLen * d2);
+    const footY = Math.round(kneeY + Math.sin(shinAngle)*shinLen);
+
+    ctx.strokeStyle='#e8b89a'; ctx.lineWidth=3; // skin colour for shin
+    ctx.beginPath(); ctx.moveTo(kneeX, kneeY); ctx.lineTo(footX, footY); ctx.stroke();
+
+    // Shoe — big visible block at foot tip
+    ctx.fillStyle='#111';
+    ctx.fillRect(footX - 1, footY - 1, 5, 3);
+    // White stripe on shoe
+    ctx.fillStyle='#fff';
+    ctx.fillRect(footX + (d2>0?1:-3), footY - 1, 2, 1);
+  }
+
+  // ── SHORTS (white) ──
+  pr(x-5, y+2, 10, 6, fl?'#ffaaaa':'#e0e0e0');
+  // shorts stripe
+  pr(x-5, y+2, 10, 1, '#bdbdbd');
+
+  // ── LEGS (skin) ──
+  // Back leg
+  pr(x-3, y+7+legBack, 4, 8, '#e8b89a');
+  // Front leg
+  pr(x-1, y+7+legFwd,  4, 8, '#f0c8a8');
+
+  // ── SOCKS (blue) + SHOES (black) ──
+  pr(x-4, y+13+legBack, 4, 3, '#1565c0');
+  pr(x,   y+13+legFwd,  4, 3, '#1565c0');
+  pr(x-5, y+15+legBack, 5, 2, '#111');  // shoe back
+  pr(x-1, y+15+legFwd,  5, 2, '#111');  // shoe front
+
+  // ── JERSEY (blue) ──
+  const jerseyC = fl?'#ff5555':'#1976d2';
+  pr(x-6, y-5, 12, 8, jerseyC);
+  // jersey collar
+  pr(x-2, y-5, 4, 2, '#ffffff');
+  // jersey number "9"
+  ctx.fillStyle=fl?'#ffaaaa':'#ffffff';
+  ctx.font='bold 5px Courier New'; ctx.textAlign='center';
+  ctx.fillText('9', x, y-1);
+
+  // ── ARMS ──
+  const armC = fl?'#ff5555':'#1976d2';
+  // back arm
+  pr(x-9, y-4+legBack, 3, 7, armC);
+  pr(x-9, y+2+legBack, 3, 2, '#e8b89a'); // forearm skin
+  // front arm
+  pr(x+6, y-4+legFwd,  3, 7, armC);
+  pr(x+6, y+2+legFwd,  3, 2, '#e8b89a');
+
+  // ── HEAD (bigger — 14x14px pixel art) ──
+  // Neck
+  pr(x-2, y-8, 4, 4, '#e8b89a');
+  // Head base
+  pr(x-7, y-22, 14, 14, '#f5c99a');
+  // Hair (dark brown, covers top 4px)
+  pr(x-7, y-22, 14, 5, '#4e342e');
+  // Ear left
+  pr(x-8, y-17, 2, 3, '#e0a87a');
+  // Ear right
+  pr(x+6, y-17, 2, 3, '#e0a87a');
+  // Eyes — 2 pixels wide each, with white + pupil
+  const eyeY = y-16;
+  const eyeLX = d>0 ? x-3 : x-4;  // eye positions shift with direction
+  const eyeRX = d>0 ? x+1 : x;
+  // whites
+  pr(eyeLX, eyeY, 3, 3, '#ffffff');
+  pr(eyeRX, eyeY, 3, 3, '#ffffff');
+  // pupils (shift toward facing direction)
+  pr(eyeLX+d, eyeY+1, 2, 2, '#1a1a1a');
+  pr(eyeRX+d, eyeY+1, 2, 2, '#1a1a1a');
+  // eyebrows
+  pr(eyeLX, eyeY-2, 3, 1, '#4e342e');
+  pr(eyeRX, eyeY-2, 3, 1, '#4e342e');
+  // mouth (small smile)
+  pr(x-2, y-10, 2, 1, '#c8805a');
+  pr(x,   y-10, 2, 1, '#c8805a');
+
+  // Stun indicator: yellow "ZAP" flicker + stun bar above player
+  if(player.stunned>0){
+    // Flicker stun stars
+    if(frameCount%4<2){
+      const starOff=[[0,-18],[6,-15],[-6,-15]];
+      starOff.forEach(([ox,oy])=>{
+        ctx.fillStyle='#ffeb3b';
+        ctx.beginPath();ctx.arc(x+ox,y+oy,2.5,0,Math.PI*2);ctx.fill();
+      });
+    }
+    // Stun bar
+    const sbW=28, sbH=3, sbX=x-sbW/2, sbY=y-22;
+    ctx.fillStyle='#222';ctx.fillRect(sbX,sbY,sbW,sbH);
+    ctx.fillStyle='#ffeb3b';ctx.fillRect(sbX,sbY,sbW*(player.stunned/62),sbH);
+    // "!" text
+    ctx.fillStyle='#ffeb3b';ctx.font='bold 9px Courier New';ctx.textAlign='center';
+    ctx.fillText('!',x,y-25);
+  }
+
+  // ── Cooldown reload ring around ball (at feet) ──
+  if(!ball.active && player.stunned<=0){
+    const maxCD2=60, minCD2=10, killB=Math.min(100,Math.floor(totalKills/5)*5);
+    const cMax=Math.max(minCD2,maxCD2-killB);
+    const progress = 1-(shootCooldown/cMax);
+    if(progress<1){
+      const ballBounceDraw = Math.abs(Math.sin(ball.bounce))*6;
+    const bfx=x+player.dir*8, bfy=y+player.h/2-ball.r-ballBounceDraw;
+      ctx.strokeStyle='rgba(232,255,0,0.5)';ctx.lineWidth=2;
+      ctx.beginPath();ctx.arc(bfx,bfy,ball.r+3,-Math.PI/2,-Math.PI/2+progress*Math.PI*2);ctx.stroke();
+    }
+  }
+}
+
+function drawBall(){
+  const ballArc = ball.active ? Math.round(ball.z) : 0; // height offset (px up)
+  const bx = Math.round(sx(ball.x));
+  const by = Math.round(sy(ball.y)) - ballArc; // ball drawn higher when arcing
+
+  // Shadow on ground (stays at ground level, shrinks+fades as ball rises)
+  const shadowScale = Math.max(0.2, 1 - ballArc/30);
+  const shadowAlpha = 0.35 * shadowScale;
+  ctx.fillStyle='rgba(0,0,0,'+shadowAlpha+')';
+  ctx.beginPath();
+  ctx.ellipse(bx, by+ballArc+ball.r, ball.r*1.1*shadowScale, ball.r*0.4*shadowScale, 0,0,Math.PI*2);
+  ctx.fill();
+
+  // Motion trail
+  if(ball.active){
+    for(let i=1;i<=4;i++){
+      ctx.fillStyle='rgba(255,255,255,'+(0.09-i*0.018)+')';
+      ctx.beginPath();
+      ctx.arc(bx-ball.vx*i*0.5, by-ball.vy*i*0.5, ball.r*(1-i*0.2), 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  // Ball itself
+  ctx.save();ctx.translate(bx,by);ctx.rotate(ball.spin);
+  ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(0,0,ball.r,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#1a1a1a';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
+  [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='#333';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+  ctx.restore();
+}
+
+function drawZombie(z){
+  const x=Math.round(sx(z.x)), y=Math.round(sy(z.y));
+  if(x<-55||x>VW+55||y<-65||y>VH+65)return;
+  const hw=Math.round(z.w/2), hh=Math.round(z.h/2), sc=z.scale;
+  const fl=z.hitFlash>0&&frameCount%2===0;
+
+  // ── EMERGING ANIMATION — 3 phases over 180 frames ──
+  // Phase 1 (0-60f):   Ground cracks, hand shoots up with fingers open, then lowers back
+  // Phase 2 (60-130f): Head rises from hole
+  // Phase 3 (130-180f): Foot plants on ground, zombie stands and walks
+  if(z.emerging>0){
+    const ef = 180 - z.emerging; // elapsed: 0→180
+    const sk = z.skin||'#9e9e9e';
+    const eyeC = z.id==='fast'?'#ccff00':'#ff1744';
+    const d2 = z.dir||1;
+
+    // Dirt hole — always visible throughout animation
+    ctx.fillStyle='rgba(38,20,10,0.92)';
+    ctx.beginPath();ctx.ellipse(x, y+hh+2, hw*1.5, 8, 0,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='rgba(93,64,55,0.6)';
+    ctx.beginPath();ctx.ellipse(x, y+hh+2, hw*0.9, 4, 0,0,Math.PI*2);ctx.fill();
+
+    // Ground crack lines (phase 1 only)
+    if(ef < 60){
+      const cp = ef/60;
+      ctx.strokeStyle='rgba(60,35,15,'+(cp*0.8)+')';
+      ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(x,y+hh+2);ctx.lineTo(x-Math.round(cp*10),y+hh-2);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(x,y+hh+2);ctx.lineTo(x+Math.round(cp*8),y+hh-3);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(x,y+hh+2);ctx.lineTo(x-Math.round(cp*6),y+hh+5);ctx.stroke();
+    }
+
+    // ── PHASE 1 (0-60f): Hand rises then lowers back into hole ──
+    if(ef < 65){
+      // BRUSQUE rise (8f), HOLD at peak (15f), normal lower (37f)
+      let p1;
+      if(ef <= 8)       p1 = ef/8;              // 0→1 fast snap up
+      else if(ef <= 23) p1 = 1.0;               // hold at peak
+      else              p1 = 1-(ef-23)/37;      // 1→0 normal lower
+
+      const rise = Math.round(p1 * 22); // max 22px above hole
+      const hy = y+hh+2 - rise;
+      const hx = x - 3;
+
+      // Wrist / forearm
+      pr(hx, hy, 6, Math.min(14, Math.round(p1*16)+2), sk);
+
+      // Fingers spread wide when rising
+      if(p1 > 0.25){
+        const fp = Math.min(1,(p1-0.25)/0.75);
+        const flen = Math.round(fp*9);
+        ctx.fillStyle=sk;
+        ctx.fillRect(hx-5, hy-flen,    2, flen+2); // pinky (far left)
+        ctx.fillRect(hx-2, hy-flen-2,  2, flen+4); // ring
+        ctx.fillRect(hx+1, hy-flen-4,  2, flen+6); // middle (tallest)
+        ctx.fillRect(hx+4, hy-flen-2,  2, flen+4); // index
+        ctx.fillRect(hx+7, hy-flen+1,  2, flen+1); // thumb (shorter, side)
+        // Dark nails at tip
+        ctx.fillStyle='#1a1a1a';
+        ctx.fillRect(hx-5, hy-flen-1,   2, 2);
+        ctx.fillRect(hx-2, hy-flen-3,   2, 2);
+        ctx.fillRect(hx+1, hy-flen-5,   2, 2);
+        ctx.fillRect(hx+4, hy-flen-3,   2, 2);
+        ctx.fillRect(hx+7, hy-flen,     2, 2);
+      }
+
+      // Dirt debris burst — only during first 15 frames (hand breaking through)
+      if(ef < 15 && ef%3===0){
+        // We trigger these once; they are already in the particles array from spawnDirt
+        // Add extra burst each frame for visual
+        const burst = 2;
+        for(let bi=0;bi<burst;bi++){
+          const ang = Math.random()*Math.PI*2;
+          const spd = 1.5+Math.random()*3;
+          particles.push({x:z.x+(Math.random()-0.5)*8, y:z.y+(Math.random()-0.5)*4,
+            vx:Math.cos(ang)*spd, vy:Math.sin(ang)*spd-1.5,
+            life:360, maxLife:360,
+            color:Math.random()<0.5?'#6d4c41':'#8d6e63',
+            sz:2+Math.random()*4, type:'dirt', gravity:0.14,
+            bounceCount:0, landed:false,
+            groundY:z.y+8+Math.random()*10,
+            rot:Math.random()*Math.PI*2, rotV:(Math.random()-0.5)*0.25});
+        }
+      }
+    }
+
+    // ── PHASE 2 (60-130f): Head rises from hole ──
+    if(ef >= 60){
+      const p2 = Math.min(1,(ef-60)/70);
+      const headW2 = Math.round(z.w*1.2);
+      const headH2 = Math.round(z.h*0.5);
+      const headTopY = y+hh+2 - Math.round(p2*(headH2 + hh*0.85));
+      const hx2 = x - Math.round(headW2/2);
+      // Clip above ground
+      ctx.save();
+      ctx.beginPath();ctx.rect(-999,-999,VW+1998,y+hh+6+999);ctx.clip();
+      pr(hx2, headTopY, headW2, headH2, sk);
+      // Hair tufts
+      ctx.fillStyle='#2a2a2a';
+      ctx.fillRect(hx2+1,headTopY-3,3,4);
+      ctx.fillRect(hx2+5,headTopY-5,3,6);
+      ctx.fillRect(hx2+headW2-7,headTopY-4,3,5);
+      // Eyes appear at p2>0.5
+      if(p2>0.5){
+        const eyY=headTopY+Math.round(headH2*0.32);
+        ctx.fillStyle='#111';ctx.fillRect(hx2+2,eyY-1,5,6);ctx.fillRect(hx2+headW2-7,eyY-1,5,6);
+        pr(hx2+3,eyY,4,4,'#fff');pr(hx2+headW2-7,eyY,4,4,'#fff');
+        ctx.fillStyle=eyeC;ctx.fillRect(hx2+4,eyY+1,2,2);ctx.fillRect(hx2+headW2-6,eyY+1,2,2);
+        ctx.fillStyle='#000';ctx.fillRect(hx2+5,eyY+2,1,1);ctx.fillRect(hx2+headW2-5,eyY+2,1,1);
+        const mY=headTopY+Math.round(headH2*0.72);
+        ctx.fillStyle='#111';ctx.fillRect(hx2+3,mY,headW2-6,3);
+        ctx.fillStyle='#eee';ctx.fillRect(hx2+4,mY,3,2);ctx.fillRect(hx2+headW2-7,mY,3,2);
+      }
+      // Neck bolts
+      if(p2>0.75){
+        pr(hx2-3,headTopY+Math.round(headH2*0.55),4,5,'#777');
+        pr(hx2+headW2-1,headTopY+Math.round(headH2*0.55),4,5,'#777');
+      }
+      ctx.restore();
+
+      // Body strip follows head up
+      if(p2>0.65){
+        const bp=(p2-0.65)/0.35;
+        const bodyClipH=Math.round(z.h*bp*0.6);
+        ctx.save();
+        ctx.beginPath();ctx.rect(x-hw-5,y+hh+2-bodyClipH,hw*2+10,bodyClipH);ctx.clip();
+        pr(x-hw+2,y-hh,z.w,Math.round(z.h*0.5),z.shirt||'#c62828');
+        ctx.restore();
+      }
+    }
+
+    // ── PHASE 3 (130-180f): Foot plants on ground ──
+    if(ef >= 130){
+      const p3=Math.min(1,(ef-130)/50);
+      const footSide=-d2;
+      const footX=x+footSide*10;
+      // Foot arcs up then stamps down
+      const footArcH=Math.round(Math.sin(p3*Math.PI)*16);
+      const footTopY=y+hh+2-footArcH;
+      ctx.fillStyle=z.pants||'#1565c0';
+      ctx.fillRect(footX-3,footTopY-Math.round(p3*8),6,Math.round(p3*8)+2);
+      ctx.fillStyle='#111';
+      ctx.fillRect(footX-4,footTopY,9,4);
+      // Dust when foot hits
+      if(p3>0.88){
+        const da=(p3-0.88)/0.12;
+        ctx.fillStyle='rgba(130,90,50,'+(0.55*(1-da))+')';
+        ctx.beginPath();ctx.ellipse(footX,y+hh+3,Math.round(da*14),3,0,0,Math.PI*2);ctx.fill();
+      }
+    }
+
+    return; // skip normal zombie draw while emerging
+  }
+
+  if(z.dead){
+    if(!z.flyingCorpse){
+      ctx.globalAlpha=Math.max(0,z.deadAnim/38);
+      ctx.fillStyle=C.blood; ctx.fillRect(x-hw,y-hh,z.w,z.h);
+      ctx.globalAlpha=1;
+    } else {
+      // Flying corpse: tumbling body with blood
+      const t=z.deadAnim/38;
+      ctx.globalAlpha=Math.max(0,t);
+      ctx.save();
+      ctx.translate(x,y);
+      // Rotate based on knock velocity direction
+      const angle=Math.atan2(z.knockY,z.knockX)+(1-t)*Math.PI*3;
+      ctx.rotate(angle);
+      ctx.fillStyle=z.body||'#4caf50';
+      ctx.fillRect(-hw,-hh,z.w,z.h);
+      ctx.fillStyle=C.blood;
+      ctx.fillRect(-hw+1,-hh+1,Math.round(z.w*0.5),Math.round(z.h*0.4));
+      ctx.restore();
+      ctx.globalAlpha=1;
+    }
+    return;
+  }
+
+  // Sprinter blink
+  // no blink for fast
+
+  const d     = z.dir||1;
+  const skin  = fl ? '#ff6666' : (z.skin||'#9e9e9e');
+  const shirt = fl ? '#cc0000' : (z.shirt||'#c62828');
+  const pants = z.pants||'#1565c0';
+  const legAnim = z.animFrame===0 ? 3 : -3;
+
+  // ── Shadow ──
+  ctx.fillStyle='rgba(0,0,0,0.22)';
+  ctx.beginPath();ctx.ellipse(x,y+hh+2,hw*0.9,3,0,0,Math.PI*2);ctx.fill();
+
+  // ── LEGS / PANTS ──
+  pr(x-4,   y+Math.round(hh*0.05)-legAnim, 5, hh+2, pants);
+  pr(x+1,   y+Math.round(hh*0.05)+legAnim, 5, hh+2, pants);
+  // Jean highlight
+  ctx.fillStyle='rgba(255,255,255,0.08)';
+  ctx.fillRect(x-3, y+Math.round(hh*0.1), 2, Math.round(hh*0.6));
+
+  // ── SHOES ──
+  pr(x-5, y+hh-legAnim, 6, 3, '#111');
+  pr(x,   y+hh+legAnim, 6, 3, '#111');
+
+  // ── TORSO (shirt) — hunched: body center shifted toward d ──
+  const hOff = d*2; // hunch offset
+  pr(x-hw+hOff, y-hh, z.w, Math.round(z.h*0.5), shirt);
+  // Torn shirt details
+  ctx.fillStyle='rgba(0,0,0,0.3)';
+  ctx.fillRect(x-hw+hOff+2, y-hh+4, Math.round(z.w*0.35), 2);
+  ctx.fillRect(x-hw+hOff+3, y-hh+8, Math.round(z.w*0.2), 1);
+
+  // ── HUNCHBACK BUMP ──
+  const bumpX = d>0 ? x-hw+hOff-1 : x+hw/2+hOff;
+  pr(bumpX, y-hh-4, Math.round(z.w*0.5), Math.round(z.h*0.18)+2, shirt);
+
+  // ── NECK ──
+  pr(x-2+hOff, y-hh-4, 4, 5, skin);
+
+  // ── HEAD — Frankenstein: tall rectangle, flat top, hair tufts ──
+  const headW = Math.round(z.w * 1.2);           // wider than body
+  const headH = Math.round(z.h * 0.55);           // tall
+  const headX = x - Math.round(headW/2) + hOff;
+  const headY = y - hh - headH - 2;
+
+  // Head base block
+  pr(headX, headY, headW, headH, skin);
+
+  // Hair tufts on top (dark spiky bits)
+  ctx.fillStyle='#2a2a2a';
+  ctx.fillRect(headX+1,       headY-3, 3, 4);
+  ctx.fillRect(headX+5,       headY-5, 3, 6);
+  ctx.fillRect(headX+headW-7, headY-4, 3, 5);
+  ctx.fillRect(headX+headW-3, headY-2, 2, 3);
+
+  // Flat top shading
+  ctx.fillStyle='rgba(0,0,0,0.18)';
+  ctx.fillRect(headX, headY, headW, 2);
+
+  // Neck bolts (Frankenstein) — square studs on each side
+  pr(headX-3, headY+Math.round(headH*0.55), 4, 5, '#777');
+  pr(headX+headW-1, headY+Math.round(headH*0.55), 4, 5, '#777');
+  // Bolt highlight
+  ctx.fillStyle='#aaa';
+  ctx.fillRect(headX-2, headY+Math.round(headH*0.55)+1, 2, 2);
+  ctx.fillRect(headX+headW, headY+Math.round(headH*0.55)+1, 2, 2);
+
+  // Forehead scar stitches
+  ctx.fillStyle='rgba(0,0,0,0.55)';
+  ctx.fillRect(headX+3, headY+6, headW-6, 1);
+  for(let si=0;si<3;si++){
+    ctx.fillRect(headX+5+si*4, headY+4, 1, 4);
+  }
+
+  // Ear on facing side only
+  const earX = d>0 ? headX+headW : headX-3;
+  pr(earX, headY+Math.round(headH*0.38), 3, 6, skin);
+
+  // ── EYES — big square eyes, Frankenstein-style ──
+  const eyeColor = z.id==='fast'?'#ccff00':'#ff1744';
+  const eyeY = headY + Math.round(headH*0.32);
+  const eyeSize = Math.max(4, Math.round(headW*0.22));
+  // Eyes shift inward toward facing direction
+  const eShift = d>0 ? 1 : -1;
+  const eye1X = headX + 2 + (d>0?1:0);
+  const eye2X = headX + headW - eyeSize - 2 + (d>0?0:-1);
+  // Dark sockets
+  ctx.fillStyle='#111';
+  ctx.fillRect(eye1X-1, eyeY-1, eyeSize+2, eyeSize+2);
+  ctx.fillRect(eye2X-1, eyeY-1, eyeSize+2, eyeSize+2);
+  // White sclera
+  pr(eye1X, eyeY, eyeSize, eyeSize, '#fff');
+  pr(eye2X, eyeY, eyeSize, eyeSize, '#fff');
+  // Coloured pupils (shifted toward facing dir)
+  ctx.fillStyle=eyeColor;
+  ctx.fillRect(eye1X+eShift, eyeY+1, eyeSize-2, eyeSize-2);
+  ctx.fillRect(eye2X+eShift, eyeY+1, eyeSize-2, eyeSize-2);
+  // Dark pupil center
+  ctx.fillStyle='#000';
+  ctx.fillRect(eye1X+1+eShift, eyeY+2, Math.max(1,eyeSize-4), Math.max(1,eyeSize-4));
+  ctx.fillRect(eye2X+1+eShift, eyeY+2, Math.max(1,eyeSize-4), Math.max(1,eyeSize-4));
+
+  // ── MOUTH — simple open rectangle ──
+  const mouthY = headY + Math.round(headH*0.72);
+  pr(headX+3, mouthY, headW-6, 4, '#111');
+  // Two top teeth
+  pr(headX+4, mouthY, 3, 2, '#eee');
+  pr(headX+headW-7, mouthY, 3, 2, '#eee');
+
+  // ── ARMS — mid-torso height, slightly longer, simple flat hands ──
+  const aThick = Math.max(3, Math.round(3*sc));
+  const armLen = Math.round(z.w * 0.65);   // a bit longer
+  const handSz = Math.max(3, Math.round(3*sc)); // small flat square hand
+
+  // Shoulder X: edge of torso
+  const sX = d>0 ? x+hw+hOff : x-hw+hOff;
+
+  // Arms at upper-mid torso — just below chest, clear of face
+  const armBaseY = y - Math.round(hh*0.55); // upper torso height
+
+  // Arm 2 (back/lower — always shorter)
+  const arm2Len = Math.round(armLen * 0.65); // shorter than arm1
+  const a2Y = armBaseY + aThick + 2;
+  const a2X = d>0 ? sX : sX - arm2Len;
+  pr(a2X, a2Y, arm2Len, aThick, skin);
+  // Hand 2
+  const h2X = d>0 ? a2X+arm2Len : a2X - handSz;
+  pr(h2X, a2Y, handSz, handSz+1, skin);
+
+  // Arm 1 (front/higher — longer)
+  const a1Y = armBaseY;
+  const a1X = d>0 ? sX : sX - armLen;
+  pr(a1X, a1Y, armLen, aThick, skin);
+  // Hand 1
+  const h1X = d>0 ? a1X+armLen : a1X - handSz;
+  pr(h1X, a1Y, handSz, handSz+1, skin);
+
+  // ── Speed label ──
+  if(z.id==='fast'){
+    ctx.fillStyle='#ccff00';
+    ctx.font='bold 8px Courier New';
+    ctx.textAlign='center';
+    ctx.fillText('!',x,headY-4);
+  }
+
+  // ── HP bar (multi-hp zombies) ──
+  if(z.maxHp>1){
+    const bw=z.w+10,bh=4,bx2=x-bw/2,by2=headY-10;
+    pr(bx2,by2,bw,bh,'#333');
+    pr(bx2,by2,bw*(z.hp/z.maxHp),bh,z.hp>=z.maxHp?'#66bb6a':'#ef5350');
+  }
+
+  ctx.globalAlpha=1;
+}
+
+function drawParticles(){
+  // Draw puddles first (bottom layer), then blood, then chunks on top
+  const order=['puddle','blood','star','chunk','dirt',null];
+  for(const t of order){
+    for(const p of particles){
+      if((t===null?(!p.type||p.text):(p.type!==t))) continue;
+      const px2=Math.round(sx(p.x)), py2=Math.round(sy(p.y));
+      if(px2<-20||px2>VW+20||py2<-20||py2>VH+20) continue;
+      // Solid 3s (180f), fade 8s (480f) — total 660f
+      const fadeStart=480;
+      let alpha;
+      if(p.type==='puddle'||(p.type==='chunk'&&p.landed)){
+        alpha = p.life > fadeStart ? 0.88 : (p.life/fadeStart)*0.88;
+      } else {
+        alpha = p.life/p.maxLife;
+      }
+      ctx.globalAlpha=Math.max(0,alpha);
+
+      if(p.text){
+        ctx.fillStyle=p.color; ctx.font='bold 11px Courier New'; ctx.textAlign='center';
+        ctx.fillText(p.text,px2,py2);
+      } else if(p.type==='chunk'){
+        // Chunks render as rotated squares (tumbling body pieces)
+        ctx.save();
+        ctx.translate(px2,py2);
+        ctx.rotate(p.rot||0);
+        ctx.fillStyle=p.color;
+        ctx.fillRect(-p.sz/2,-p.sz/2,p.sz,p.sz);
+        ctx.restore();
+      } else if(p.type==='puddle'){
+        // Puddles are ellipses on the ground
+        ctx.fillStyle=p.color;
+        ctx.beginPath();
+        ctx.ellipse(px2,py2,p.sz,p.sz*0.5,0,0,Math.PI*2);
+        ctx.fill();
+      } else {
+        ctx.fillStyle=p.color;
+        ctx.fillRect(px2-p.sz/2,py2-p.sz/2,p.sz,p.sz);
+      }
+      ctx.globalAlpha=1;
+    }
+  }
+}
+
+// ── Draw powerup squares ──
+function drawPowerups(){
+  const t=frameCount;
+  for(const pu of powerups){
+    const px2=Math.round(sx(pu.x)), py2=Math.round(sy(pu.y));
+    if(px2<-50||px2>VW+50||py2<-50||py2>VH+50) continue;
+    const blinkPhase = pu.life < 180;
+    if(blinkPhase && Math.floor(t/7)%2===0) continue;
+    const sz=22, half=sz/2;
+    const glow=pu.def.glow, col=pu.def.color;
+    ctx.save();
+    const pulse=0.7+0.3*Math.sin(t*0.12);
+    for(let layer=4;layer>0;layer--){
+      ctx.globalAlpha=(0.07+layer*0.04)*pulse;
+      ctx.fillStyle=glow;
+      ctx.fillRect(px2-half-layer*3, py2-half-layer*3, sz+layer*6, sz+layer*6);
+    }
+    ctx.globalAlpha=1;
+    ctx.fillStyle='rgba(0,0,0,0.82)';
+    ctx.fillRect(px2-half-2,py2-half-2,sz+4,sz+4);
+    ctx.strokeStyle=glow; ctx.lineWidth=2.5;
+    ctx.shadowColor=glow; ctx.shadowBlur=12*pulse;
+    ctx.strokeRect(px2-half,py2-half,sz,sz);
+    ctx.shadowBlur=0;
+    ctx.fillStyle=col;
+    ctx.fillRect(px2-half,py2-half,sz,sz);
+    ctx.font='16px Courier New'; ctx.textAlign='center';
+    ctx.globalAlpha=1;
+    if(pu.def.icon==='GUN'){
+      // Draw pixel-art shotgun inside the square
+      ctx.save();
+      ctx.translate(px2, py2);
+      const gc='#cfd8dc'; // barrel grey
+      const sc='#6d4c41'; // stock brown
+      const dc='#455a64'; // dark receiver
+      // Stock (left side, angled slightly)
+      ctx.fillStyle=sc;
+      ctx.fillRect(-11, -1, 6, 4);   // stock body
+      ctx.fillRect(-11, 2, 4, 3);    // stock butt
+      // Receiver (centre)
+      ctx.fillStyle=dc;
+      ctx.fillRect(-5, -2, 7, 5);
+      // Pump guard
+      ctx.fillStyle='#ff7043';
+      ctx.fillRect(-1, 1, 5, 3);
+      // Barrel (right side, long)
+      ctx.fillStyle=gc;
+      ctx.fillRect(2, -1, 10, 3);
+      // Muzzle tip (bright)
+      ctx.fillStyle='#eceff1';
+      ctx.fillRect(11, -1, 2, 3);
+      // Trigger guard (small arc)
+      ctx.fillStyle=dc;
+      ctx.fillRect(-2, 3, 2, 3);
+      ctx.restore();
+    } else {
+      ctx.fillText(pu.def.icon, px2, py2+6);
+    }
+    ctx.fillStyle='#ffffff'; ctx.font='bold 7px Courier New';
+    ctx.fillText(pu.def.label, px2, py2+half+9);
+    ctx.restore();
+  }
+}
+
+// ── Draw thunderbolts — blue bolt top→ground, stops at impact, shockwave ──
+function drawThunderbolts(){
+  for(const tb of thunderbolts){
+    const age=tb.maxLife-tb.life;            // 0→maxLife elapsed
+    const totalLife=tb.maxLife;
+
+    // Phase 1 (0→20f): bolt travels from top of screen down to ground
+    const travelFrames=20;
+    const impactFrames=totalLife-travelFrames; // 40f of impact glow
+
+    const bx=Math.round(sx(tb.x));
+    const byTop=-10; // just above screen top
+    const byGround=Math.round(sy(tb.yEnd)); // ground impact point on screen
+
+    ctx.save();
+
+    if(age<=travelFrames){
+      // Bolt tip progresses from top to ground
+      const t=age/travelFrames;
+      const byTip=Math.round(byTop+(byGround-byTop)*t);
+      const fadeAlpha=Math.min(1,age/4); // quick fade in
+
+      ctx.globalAlpha=fadeAlpha;
+      // Draw bolt from top to current tip
+      const segs=12;
+      // Layer 1: wide outer glow
+      ctx.shadowColor='#1565c0'; ctx.shadowBlur=28;
+      ctx.strokeStyle='#0d47a1'; ctx.lineWidth=13; ctx.lineCap='round';
+      _drawBoltPath(ctx,bx,byTop,bx,byTip,segs,20);
+      // Layer 2: mid blue
+      ctx.shadowColor='#42a5f5'; ctx.shadowBlur=16;
+      ctx.strokeStyle='#1976d2'; ctx.lineWidth=6;
+      _drawBoltPath(ctx,bx,byTop,bx,byTip,segs,14);
+      // Layer 3: bright core
+      ctx.shadowColor='#90caf9'; ctx.shadowBlur=8;
+      ctx.strokeStyle='#e3f2fd'; ctx.lineWidth=2;
+      _drawBoltPath(ctx,bx,byTop,bx,byTip,segs,6);
+      // Tip flash
+      ctx.fillStyle='#e3f2fd'; ctx.shadowBlur=20;
+      ctx.beginPath(); ctx.arc(bx,byTip,6*t+2,0,Math.PI*2); ctx.fill();
+
+    } else {
+      // Phase 2: full bolt visible + ground shockwave expanding
+      const impactAge=age-travelFrames;
+      const impactProg=impactAge/impactFrames; // 0→1
+      const fadeAlpha=Math.max(0,1-impactProg);
+
+      ctx.globalAlpha=fadeAlpha;
+      // Full bolt (slightly jagged, stable)
+      ctx.shadowColor='#1565c0'; ctx.shadowBlur=24;
+      ctx.strokeStyle='#0d47a1'; ctx.lineWidth=10; ctx.lineCap='round';
+      _drawBoltPath(ctx,bx,byTop,bx,byGround,12,16);
+      ctx.shadowColor='#42a5f5'; ctx.shadowBlur=12;
+      ctx.strokeStyle='#1976d2'; ctx.lineWidth=5;
+      _drawBoltPath(ctx,bx,byTop,bx,byGround,12,10);
+      ctx.shadowColor='#90caf9'; ctx.shadowBlur=6;
+      ctx.strokeStyle='#e3f2fd'; ctx.lineWidth=2;
+      _drawBoltPath(ctx,bx,byTop,bx,byGround,12,5);
+
+      // Ground shockwave ring (expands outward)
+      const ringR=impactProg*90*ZOOM*0.5; // expands to ~90 world units radius
+      ctx.shadowColor='#42a5f5'; ctx.shadowBlur=20*(1-impactProg);
+      ctx.strokeStyle='#1565c0'; ctx.lineWidth=4*(1-impactProg);
+      ctx.globalAlpha=fadeAlpha*0.8;
+      ctx.beginPath(); ctx.arc(bx,byGround,ringR,0,Math.PI*2); ctx.stroke();
+      // Inner bright flash
+      ctx.fillStyle='#e3f2fd'; ctx.shadowBlur=30*(1-impactProg);
+      ctx.globalAlpha=fadeAlpha*(1-impactProg)*0.7;
+      ctx.beginPath(); ctx.arc(bx,byGround,10*(1-impactProg),0,Math.PI*2); ctx.fill();
+
+      // Electric ground arcs radiating outward
+      ctx.globalAlpha=fadeAlpha*0.6*(1-impactProg);
+      ctx.strokeStyle='#42a5f5'; ctx.lineWidth=1.5; ctx.shadowBlur=10;
+      const arcCount=6;
+      for(let i=0;i<arcCount;i++){
+        const a=(i/arcCount)*Math.PI*2+impactProg*0.8;
+        const len=(40+Math.random()*30)*impactProg*ZOOM*0.5;
+        ctx.beginPath();
+        ctx.moveTo(bx,byGround);
+        ctx.lineTo(bx+Math.cos(a)*len, byGround+Math.sin(a)*len*0.4);
+        ctx.stroke();
+      }
+    }
+
+    ctx.shadowBlur=0; ctx.globalAlpha=1;
+    ctx.restore();
+  }
+}
+
+// Helper: draw a jagged bolt path between two screen points
+function _drawBoltPath(ctx,x1,y1,x2,y2,segs,jag){
+  ctx.beginPath();
+  ctx.moveTo(x1,y1);
+  for(let i=1;i<=segs;i++){
+    const t=i/segs;
+    const py3=y1+(y2-y1)*t;
+    const px3=x1+(x2-x1)*t+(i<segs?(Math.random()-0.5)*jag:0);
+    ctx.lineTo(px3,py3);
+  }
+  ctx.stroke();
+}
+
+// ── Draw active effect gauges ──
+function drawActiveFX(){
+  const fxList=[];
+  if(fx.fireBall.active)   fxList.push({icon:'🔥',color:'#ff6d00',timer:fx.fireBall.timer,max:fx.fireBall.max});
+  if(ricochetCount>0)      fxList.push({icon:'↩️',color:'#00e5ff',timer:ricochetTimer,max:1800,extra:'×'+ricochetCount});
+  if(extraBalls.length>0)  fxList.push({icon:'⚽',color:'#e8ff00',timer:-1,max:1,extra:extraBalls.length+1+' balls',permanent:true});
+  if(orbitBalls.length>0)  fxList.push({icon:'⚽',color:'#ffe066',timer:orbitBallsTimer,max:1200,extra:'×6 ORBIT'});
+  if(fx.thunder.active)    fxList.push({icon:'⚡',color:'#1565c0',timer:fx.thunder.timer,max:fx.thunder.max});
+  if(fx.slowMo.active)     fxList.push({icon:'🐌',color:'#e040fb',timer:fx.slowMo.timer,max:fx.slowMo.max});
+  if(fx.shotgun.active)    fxList.push({icon:'💥',color:'#ff5722',timer:fx.shotgun.timer,max:fx.shotgun.max,extra:fx.shotgun.reloading>0?'RELOAD':('×'+fx.shotgun.shots)});
+  if(samurai.active)       fxList.push({icon:'⚔️',color:'#c0c0c0',timer:samurai.timer,max:samurai.max});
+  if(!fxList.length) return;
+  const barW=140, barH=16, gap=5;
+  const startX=10, startY=VH-52-fxList.length*(barH+gap);
+  fxList.forEach((f,i)=>{
+    const fy=startY+i*(barH+gap);
+    ctx.fillStyle='rgba(0,0,0,0.75)'; ctx.fillRect(startX,fy,barW+32,barH);
+    ctx.font='12px Courier New'; ctx.textAlign='left';
+    ctx.fillText(f.icon, startX+2, fy+13);
+    if(f.permanent){
+      // Permanent effect: show solid colored bar + label
+      ctx.fillStyle=f.color; ctx.fillRect(startX+20,fy+3,barW,10);
+      ctx.fillStyle='rgba(255,255,255,0.15)'; ctx.fillRect(startX+20,fy+3,barW,5);
+    } else {
+      ctx.fillStyle='#333'; ctx.fillRect(startX+20,fy+3,barW,10);
+      const prog=f.timer/f.max;
+      ctx.fillStyle=f.color; ctx.fillRect(startX+20,fy+3,barW*prog,10);
+      ctx.fillStyle='rgba(255,255,255,0.15)'; ctx.fillRect(startX+20,fy+3,barW*prog,5);
+    }
+    if(f.extra){ ctx.fillStyle='#fff'; ctx.font='bold 8px Courier New'; ctx.textAlign='right';
+      ctx.fillText(f.extra, startX+20+barW-2, fy+13); }
+  });
+}
+
+// ── Draw fireball aura on ball ──
+// ── Persistent fire particles on the ball (slow, large pixels) ──
+let _ballFirePx=[];
+function _initBallFire(){
+  _ballFirePx=[];
+  for(let i=0;i<10;i++){
+    _ballFirePx.push({
+      ox:(Math.random()-0.5)*18, oy:Math.random()*10+2,
+      vx:(Math.random()-0.5)*0.15, vy:-(0.22+Math.random()*0.28),
+      phase:Math.random()*Math.PI*2,
+      life:Math.floor(Math.random()*60),
+      maxLife:50+Math.floor(Math.random()*40),
+      sz:5+Math.floor(Math.random()*5),
+      col:Math.random()<0.55?'#ff6d00':Math.random()<0.6?'#ffeb3b':'#ff3d00',
+      isSpark:Math.random()<0.2,
+    });
+  }
+}
+
+function drawBallFire(){
+  if(!fx.fireBall.active) return;
+  // Init on first call each activation
+  if(_ballFirePx.length===0) _initBallFire();
+
+  const bArc=ball.active?Math.round(ball.z):0;
+  const bx=Math.round(sx(ball.x)), by=Math.round(sy(ball.y))-bArc;
+
+  ctx.save();
+
+  // Update + draw each fire pixel
+  for(let i=_ballFirePx.length-1;i>=0;i--){
+    const fp=_ballFirePx[i];
+    fp.life--;
+    if(fp.life<=0){
+      // Recycle particle
+      fp.ox=(Math.random()-0.5)*18; fp.oy=Math.random()*8+4;
+      fp.vx=(Math.random()-0.5)*0.15; fp.vy=-(0.22+Math.random()*0.28);
+      fp.phase=Math.random()*Math.PI*2;
+      fp.life=50+Math.floor(Math.random()*40); fp.maxLife=fp.life;
+      fp.sz=5+Math.floor(Math.random()*5);
+      fp.col=Math.random()<0.55?'#ff6d00':Math.random()<0.6?'#ffeb3b':'#ff3d00';
+      fp.isSpark=Math.random()<0.2;
+      continue;
+    }
+    fp.phase+=0.045;
+    fp.ox += fp.vx + Math.sin(fp.phase)*0.2;
+    fp.oy -= fp.isSpark ? 0.6+Math.random()*0.3 : 0.28+Math.abs(Math.sin(fp.phase))*0.12;
+    if(fp.isSpark) fp.ox+=(Math.random()-0.5)*0.7;
+
+    const alpha=(fp.life/fp.maxLife)*0.9;
+    const px2=Math.round(bx+fp.ox), py2=Math.round(by-fp.oy);
+
+    // Glow layer (soft, large)
+    ctx.globalAlpha=alpha*0.35;
+    ctx.fillStyle=fp.col;
+    ctx.fillRect(px2-fp.sz, py2-fp.sz, fp.sz*2+2, fp.sz*2+2);
+    // Core pixel block
+    ctx.globalAlpha=alpha;
+    ctx.fillStyle=fp.isSpark?'#fff9c4':fp.col;
+    const cs=fp.isSpark?2:fp.sz;
+    ctx.fillRect(px2-Math.floor(cs/2), py2-Math.floor(cs/2), cs, cs);
+  }
+  ctx.globalAlpha=1;
+
+  // Outer glow ring around ball
+  const pulse=0.6+0.4*Math.sin(frameCount*0.18);
+  ctx.shadowColor='#ff6d00'; ctx.shadowBlur=14*pulse;
+  ctx.globalAlpha=0.45*pulse;
+  ctx.strokeStyle='#ff9800'; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.arc(bx,by,ball.r+4,0,Math.PI*2); ctx.stroke();
+  ctx.shadowBlur=0; ctx.globalAlpha=1;
+
+  ctx.restore();
+}
+
+// ── Draw extra balls (identical to main ball) ──
+function drawBall2(){
+  for(const eb of extraBalls){
+    const bArc=eb.active?Math.round(eb.z):0;
+    const bx=Math.round(sx(eb.x)), by=Math.round(sy(eb.y))-bArc;
+    // Shadow
+    const shadowScale=Math.max(0.2,1-bArc/30);
+    ctx.fillStyle='rgba(0,0,0,'+(0.35*shadowScale)+')';
+    ctx.beginPath();ctx.ellipse(bx,by+bArc+eb.r,eb.r*1.1*shadowScale,eb.r*0.4*shadowScale,0,0,Math.PI*2);ctx.fill();
+    // Motion trail
+    if(eb.active){
+      for(let i=1;i<=4;i++){
+        ctx.fillStyle='rgba(255,255,255,'+(0.09-i*0.018)+')';
+        ctx.beginPath();ctx.arc(bx-eb.vx*i*0.5,by-eb.vy*i*0.5,eb.r*(1-i*0.2),0,Math.PI*2);ctx.fill();
+      }
+    }
+    // Ball itself — identical design to main ball
+    ctx.save();ctx.translate(bx,by);ctx.rotate(eb.spin);
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(0,0,eb.r,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#1a1a1a';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
+    [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='#333';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+    ctx.restore();
+    // Fire aura on extra ball if fireball active
+    if(fx.fireBall.active){
+      ctx.save();
+      for(let i=0;i<3;i++){
+        const a=Math.random()*Math.PI*2;
+        ctx.fillStyle=Math.random()<0.5?'#ff6d00':'#ffeb3b';
+        ctx.globalAlpha=0.5*Math.random();
+        ctx.beginPath();ctx.arc(bx+Math.cos(a)*(eb.r+2),by+Math.sin(a)*(eb.r+2),2+Math.random()*3,0,Math.PI*2);ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+}
+
+// ── Draw fire trails — varied pixels shrinking over time, chaotic sparks ──
+function drawFireTrails(){
+  if(!fireTrails.length) return;
+  ctx.save();
+  for(const ft of fireTrails){
+    const cx2=Math.round(sx(ft.x)), cy2=Math.round(sy(ft.y));
+    if(cx2<-60||cx2>VW+60||cy2<-60||cy2>VH+60) continue;
+
+    const ratio=ft.life/ft.maxLife; // 1=fresh → 0=dying
+
+    // Base glow under the whole segment (fades with ratio)
+    ctx.globalAlpha=ratio*0.22;
+    ctx.fillStyle='#ff6d00';
+    ctx.fillRect(cx2-14, cy2-20, 28, 22);
+    ctx.globalAlpha=1;
+
+    if(!ft.pixels) continue;
+
+    for(const p of ft.pixels){
+      // Each pixel born at life=120, dies at 0
+      // Shrink: pixel size goes from full → 0 linearly with ratio
+      const shrink = ratio; // same as ft.life/ft.maxLife
+      const curSz = Math.max(1, Math.round(p.sz * shrink));
+
+      // Screen offset (world-space offset scaled to screen)
+      const psx = cx2 + Math.round(p.ox * ZOOM * 0.45);
+      const psy = cy2 + Math.round(p.oy * ZOOM * 0.45);
+
+      if(p.type==='block'){
+        // Block alpha: full until 40% life, then fades
+        const alpha = ratio > 0.4 ? 0.92 : (ratio/0.4)*0.92;
+        // Glow layer
+        ctx.globalAlpha=alpha*0.3;
+        ctx.fillStyle=p.col;
+        ctx.fillRect(psx-curSz-2, psy-curSz-2, curSz*2+4, curSz*2+4);
+        // Core pixel
+        ctx.globalAlpha=alpha;
+        ctx.fillStyle=p.col;
+        ctx.fillRect(psx-Math.floor(curSz/2), psy-Math.floor(curSz/2), curSz, curSz);
+
+      } else { // spark
+        // Sparks: smaller, rise upward, fade faster
+        const alpha = ratio > 0.55 ? 0.95 : (ratio/0.55)*0.95;
+        const spSz = Math.max(1, Math.round(p.sz * ratio));
+        // Tiny glow
+        ctx.globalAlpha=alpha*0.35;
+        ctx.fillStyle=p.col;
+        ctx.fillRect(psx-spSz-1, psy-spSz-1, spSz*2+2, spSz*2+2);
+        // Bright spark core
+        ctx.globalAlpha=alpha;
+        ctx.fillStyle=p.col;
+        ctx.fillRect(psx-Math.floor(spSz/2), psy-Math.floor(spSz/2), spSz, spSz);
+      }
+    }
+  }
+  ctx.globalAlpha=1;
+  ctx.restore();
+}
+
+// ── Draw shotgun: player holds gun straight, continuous fire/reload animation ──
+function drawShotgunAim(){
+  if(!fx.shotgun.active) return;
+  const px=Math.round(sx(player.x)), py=Math.round(sy(player.y));
+  const aimX=fx.shotgun.aimX||player.dir, aimY=fx.shotgun.aimY||0;
+  const isReloading=fx.shotgun.reloading>0;
+  // reloadProg: 0=just fired, 1=reload done
+  const reloadProg=isReloading?(1-fx.shotgun.reloading/20):0;
+
+  ctx.save();
+
+  // ── Gun body ──
+  // Barrel direction always matches aim
+  const stockLen=14, barrelLen=28;
+
+  // Pump position: slides back 8px at start of reload, then springs forward
+  const pumpOffset=isReloading ? Math.round((1-reloadProg)*8) : 0;
+
+  // Stock (behind torso, brown wood)
+  const stockStartX=px - Math.round(aimX*(stockLen+2));
+  const stockStartY=py + Math.round(aimY*2) - 3;
+  const stockEndX=px - Math.round(aimX*2);
+  const stockEndY=py - 3;
+  ctx.strokeStyle='#6d4c41'; ctx.lineWidth=7; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(stockStartX,stockStartY); ctx.lineTo(stockEndX,stockEndY); ctx.stroke();
+
+  // Receiver (darker, body of gun)
+  ctx.strokeStyle='#455a64'; ctx.lineWidth=7; ctx.lineCap='butt';
+  ctx.beginPath();
+  ctx.moveTo(stockEndX, stockEndY);
+  ctx.lineTo(px+Math.round(aimX*10), py+Math.round(aimY*10)-3);
+  ctx.stroke();
+
+  // Barrel (bright grey metal, points forward)
+  const barrelStartX=px+Math.round(aimX*4);
+  const barrelStartY=py+Math.round(aimY*4)-3;
+  const barrelEndX=px+Math.round(aimX*barrelLen);
+  const barrelEndY=py+Math.round(aimY*barrelLen)-3;
+  ctx.strokeStyle=isReloading?'#90a4ae':'#cfd8dc'; ctx.lineWidth=5; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(barrelStartX,barrelStartY); ctx.lineTo(barrelEndX,barrelEndY); ctx.stroke();
+
+  // ── PUMP — very visible, slides back on reload ──
+  // Pump slides from mid-barrel backward during reload, springs forward when done
+  const pumpBaseX=px+Math.round(aimX*(14-pumpOffset));
+  const pumpBaseY=py+Math.round(aimY*(14-pumpOffset))-3;
+  // Pump block: big darker rectangle perpendicular to barrel
+  ctx.save();
+  ctx.translate(pumpBaseX, pumpBaseY);
+  ctx.rotate(Math.atan2(aimY,aimX));
+  // Pump body
+  ctx.fillStyle=isReloading?'#ff9800':'#78909c';
+  ctx.fillRect(-6, -5, 12, 5); // thick pump grip
+  ctx.fillStyle=isReloading?'#ffcc02':'#90a4ae';
+  ctx.fillRect(-5, -4, 10, 2); // highlight stripe
+  ctx.restore();
+
+  // ── Muzzle flash on fire ──
+  if(fx.shotgun.muzzleFlash>0){
+    const mf=fx.shotgun.muzzleFlash/14;
+    // Full beam to screen edge
+    const beamLen=Math.max(VW,VH)*1.6;
+    const grad=ctx.createLinearGradient(
+      barrelEndX, barrelEndY,
+      barrelEndX+Math.round(aimX*beamLen),
+      barrelEndY+Math.round(aimY*beamLen));
+    grad.addColorStop(0,'rgba(255,253,180,0.98)');
+    grad.addColorStop(0.04,'rgba(255,200,40,0.85)');
+    grad.addColorStop(0.18,'rgba(255,130,0,0.4)');
+    grad.addColorStop(1,'rgba(255,80,0,0)');
+    ctx.globalAlpha=mf;
+    ctx.strokeStyle=grad; ctx.lineWidth=Math.round(16*mf); ctx.lineCap='round';
+    ctx.shadowColor='#ffeb3b'; ctx.shadowBlur=28*mf;
+    ctx.beginPath();
+    ctx.moveTo(barrelEndX,barrelEndY);
+    ctx.lineTo(barrelEndX+Math.round(aimX*beamLen), barrelEndY+Math.round(aimY*beamLen));
+    ctx.stroke();
+    // Muzzle starburst
+    ctx.globalAlpha=mf*0.95;
+    ctx.fillStyle='#fffde7'; ctx.shadowBlur=35*mf;
+    ctx.beginPath(); ctx.arc(barrelEndX,barrelEndY,10*mf,0,Math.PI*2); ctx.fill();
+    ctx.shadowBlur=0;
+  }
+  ctx.globalAlpha=1;
+
+  // ── Reload progress bar (orange, above player, very visible) ──
+  if(isReloading){
+    const bw=40, bh=6, bx2=px-bw/2, by2=py-40;
+    // Background
+    ctx.fillStyle='rgba(0,0,0,0.8)'; ctx.fillRect(bx2-2,by2-2,bw+4,bh+4);
+    ctx.fillStyle='#212121'; ctx.fillRect(bx2,by2,bw,bh);
+    // Fill
+    ctx.fillStyle='#ff9800'; ctx.fillRect(bx2,by2,Math.round(bw*reloadProg),bh);
+    ctx.fillStyle='rgba(255,255,255,0.25)'; ctx.fillRect(bx2,by2,Math.round(bw*reloadProg),3);
+    // "RELOAD" label
+    ctx.fillStyle='#ff9800'; ctx.font='bold 8px Courier New'; ctx.textAlign='center';
+    ctx.fillText('♻ RELOAD',px,by2-3);
+  }
+
+  ctx.restore();
+}
+
+// ── Draw on-fire overlay on zombies — large pixels, slow animation, glow ──
+function drawZombieFire(z){
+  if(!z.onFire||!z.fireParticles) return;
+  const zx=Math.round(sx(z.x)), zy=Math.round(sy(z.y));
+  // How much of the zombie body height to cover (world units → screen)
+  const sh=Math.round(z.h*ZOOM);
+
+  ctx.save();
+
+  for(const fp of z.fireParticles){
+    const alpha=(fp.life/fp.maxLife);
+    if(alpha<=0) continue;
+    // Screen position: center on zombie, offset up from feet
+    const px2=Math.round(zx + fp.ox*ZOOM);
+    const py2=Math.round(zy - fp.oy*ZOOM);
+
+    // Glow halo (big soft square behind pixel)
+    ctx.globalAlpha=alpha*0.3;
+    ctx.fillStyle=fp.col;
+    const gs=fp.sz*2+4;
+    ctx.fillRect(px2-Math.floor(gs/2), py2-Math.floor(gs/2), gs, gs);
+
+    // Core pixel block
+    ctx.globalAlpha=alpha*(fp.isSpark?0.95:0.88);
+    ctx.fillStyle=fp.isSpark?'#fff59d':fp.col;
+    const cs=fp.isSpark?Math.max(2,fp.sz-3):fp.sz;
+    ctx.fillRect(px2-Math.floor(cs/2), py2-Math.floor(cs/2), cs, cs);
+  }
+
+  // Outer glow corona around zombie silhouette
+  const pulse=0.55+0.45*Math.sin(frameCount*0.14+z.x);
+  ctx.globalAlpha=0.38*pulse*(z.fireTimer/180);
+  ctx.shadowColor='#ff6d00'; ctx.shadowBlur=18*pulse;
+  ctx.strokeStyle='#ff9800'; ctx.lineWidth=3;
+  // Draw glow as rounded rect around zombie bounding box
+  const hw=Math.round(z.w/2*ZOOM)+4;
+  ctx.strokeRect(zx-hw, zy-sh-6, hw*2, sh+6);
+  ctx.shadowBlur=0; ctx.globalAlpha=1;
+
+  ctx.restore();
+}
+
+function drawJoystick(){
+  if(!joystickActive)return;
+  ctx.strokeStyle='rgba(255,255,255,0.2)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(joystickBase.x,joystickBase.y,48,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle='rgba(255,255,255,0.13)';
+  ctx.beginPath();ctx.arc(joystickBase.x+joystickDelta.x,joystickBase.y+joystickDelta.y,22,0,Math.PI*2);ctx.fill();
+}
+
+function drawMinimap(){
+  // Minimap: 20% bigger than previous (80×144 → 96×173), top-right corner
+  const mmW=96, mmH=173, mmX=VW-mmW-6, mmY=6;
+  ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(mmX,mmY,mmW,mmH);
+  ctx.strokeStyle='#444'; ctx.lineWidth=1; ctx.strokeRect(mmX,mmY,mmW,mmH);
+  // Pitch outline
+  ctx.strokeStyle='#2e7d32'; ctx.lineWidth=1;
+  const pmx=mmX+(PITCH.x/WORLD.w)*mmW, pmy=mmY+(PITCH.y/WORLD.h)*mmH;
+  ctx.strokeRect(pmx,pmy,(PITCH.w/WORLD.w)*mmW,(PITCH.h/WORLD.h)*mmH);
+  // Zombies
+  zombies.filter(z=>!z.dead).forEach(z=>{
+    const zx=mmX+(z.x/WORLD.w)*mmW, zy=mmY+(z.y/WORLD.h)*mmH;
+    ctx.fillStyle=z.id==='fast'?'#ffeb3b':z.id==='tank'?'#ce93d8':z.id==='big'?'#ef9a9a':'#ff1744';
+    ctx.fillRect(zx-1.5,zy-1.5,3,3);
+  });
+  // Player
+  const ppx=mmX+(player.x/WORLD.w)*mmW, ppy=mmY+(player.y/WORLD.h)*mmH;
+  ctx.fillStyle='#e8ff00'; ctx.fillRect(ppx-4,ppy-4,8,8);
+  // Camera rect
+  ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.lineWidth=1;
+  ctx.strokeRect(mmX+(cam.x/WORLD.w)*mmW,mmY+(cam.y/WORLD.h)*mmH,(VW/WORLD.w)*mmW,(VH/WORLD.h)*mmH);
+}
+
+function drawUI(){
+  // ── Common font size for all HUD elements ──
+  const F = '16px Courier New';   // labels
+  const FB = 'bold 20px Courier New'; // numbers/values
+  const panelX = 8;
+  const panelW = 130; // width used for energy bar and kill panel
+
+  // ── ENERGY BAR — top left, same width as kill panel ──
+  const hpH=13, hpY=6;
+  const hpColor=player.hp>50?'#4caf50':player.hp>25?'#ff9800':'#f44336';
+  pr(panelX, hpY, panelW, hpH, '#1a1a1a');
+  pr(panelX, hpY, panelW*(player.hp/player.maxHp), hpH, hpColor);
+  ctx.fillStyle='rgba(255,255,255,0.14)';
+  ctx.fillRect(panelX, hpY, panelW*(player.hp/player.maxHp), hpH/2);
+  ctx.fillStyle='#ffffff'; ctx.font=F; ctx.textAlign='left';
+  ctx.fillText('❤ '+Math.ceil(player.hp)+'%', panelX+2, hpY+hpH+13);
+
+  // ── ONE UP icons — right of energy bar ──
+  if(oneUpCount>0 || oneUpAnim>0){
+    const ouX = panelX + panelW + 10;
+    const ouY = hpY;
+    // Pulsing scale when just earned
+    const pulse = oneUpAnim>0 ? 1 + 0.3*Math.sin((oneUpAnim/120)*Math.PI*4)*(oneUpAnim/120) : 1;
+    ctx.save();
+    ctx.font = `bold ${Math.round(14*pulse)}px Courier New`;
+    ctx.textAlign='left';
+    // Glow when recently earned
+    if(oneUpAnim>0){
+      ctx.shadowColor='#e8ff00'; ctx.shadowBlur=12*(oneUpAnim/120);
+    }
+    // Draw up to 5 1UP hearts in a row
+    const display = Math.min(oneUpCount, 5);
+    for(let i=0;i<display;i++){
+      ctx.fillStyle= oneUpAnim>0 ? '#e8ff00' : '#aaffaa';
+      ctx.fillText('1UP', ouX + i*32, ouY+13);
+    }
+    if(oneUpCount>5){
+      ctx.fillStyle='#ffffff'; ctx.font='10px Courier New';
+      ctx.fillText('×'+oneUpCount, ouX + 5*32, ouY+13);
+    }
+    ctx.shadowBlur=0; ctx.restore();
+  }
+
+  // ── KILLS BY TYPE + SCORE — top left, décalé vers le bas pour laisser de l'espace sous la barre ──
+  const killRows=[
+    {id:'normal', icon:'🧟', label:'NORMAL', color:'#c0c0c0'},
+    {id:'big',    icon:'💀', label:'BIG',    color:'#ef9a9a'},
+    {id:'tank',   icon:'☠️', label:'TANK',   color:'#ce93d8'},
+    {id:'fast',   icon:'⚡', label:'FAST',   color:'#ccff00'},
+  ];
+  const rowH=42, panelStartY=52; // rowH augmenté pour espacer les lignes
+
+  killRows.forEach((row,i)=>{
+    const ry=panelStartY+i*rowH;
+    ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=6;
+    ctx.font='18px Courier New'; ctx.textAlign='left';
+    ctx.fillText(row.icon, panelX+2, ry+18);
+    ctx.fillStyle=row.color; ctx.font=F;
+    ctx.fillText(row.label, panelX+26, ry+10);
+    ctx.fillStyle='#ffffff'; ctx.font=FB;
+    ctx.fillText(killsByType[row.id]||0, panelX+26, ry+28);
+    ctx.shadowBlur=0;
+  });
+
+  // ── WAVE + ALIVE — juste sous les kills ──
+  const infoY = panelStartY + killRows.length*rowH + 6;
+
+  // WAVE
+  ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=6;
+  ctx.fillStyle='#ffffff'; ctx.font=F; ctx.textAlign='left';
+  ctx.fillText('WAVE', panelX+4, infoY+14);
+  ctx.fillStyle='#ff4444'; ctx.font='bold 22px Courier New';
+  ctx.fillText(wave, panelX+4, infoY+34);
+  ctx.shadowBlur=0;
+
+  // ALIVE
+  const alive=zombies.filter(z=>!z.dead&&z.emerging===0).length;
+  ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=6;
+  ctx.fillStyle='#ffffff'; ctx.font=F; ctx.textAlign='left';
+  ctx.fillText('🧟 ALIVE', panelX+4, infoY+54);
+  ctx.fillStyle='#ff6666'; ctx.font='bold 22px Courier New';
+  ctx.fillText(alive, panelX+4, infoY+74);
+  ctx.shadowBlur=0;
+
+  // ── SCORE — bas gauche ──
+  ctx.shadowColor='rgba(0,0,0,0.95)'; ctx.shadowBlur=8;
+  ctx.fillStyle='#ffffff'; ctx.font=F; ctx.textAlign='left';
+  ctx.fillText('SCORE', panelX+4, VH-44);
+  ctx.fillStyle='#e8ff00'; ctx.font='bold 28px Courier New';
+  ctx.fillText(score, panelX+4, VH-18);
+  ctx.shadowBlur=0;
+
+  // ── MEGA DASH active overlay ──
+  if(megaDash.active){
+    const prog=megaDash.timer/megaDash.max;
+    // Blue electric vignette
+    const gd=ctx.createRadialGradient(VW/2,VH/2,VH*0.15,VW/2,VH/2,VH*0.75);
+    gd.addColorStop(0,'rgba(0,180,255,0)');
+    gd.addColorStop(1,`rgba(0,60,180,${0.22*prog})`);
+    ctx.fillStyle=gd; ctx.fillRect(0,0,VW,VH);
+    // Timer bar at top center
+    const bw=180, bh=8, bx3=VW/2-bw/2, by3=20;
+    ctx.fillStyle='rgba(0,0,0,0.65)'; ctx.fillRect(bx3-2,by3-2,bw+4,bh+4);
+    ctx.fillStyle='#003344'; ctx.fillRect(bx3,by3,bw,bh);
+    const gc=ctx.createLinearGradient(bx3,0,bx3+bw*prog,0);
+    gc.addColorStop(0,'#00eeff'); gc.addColorStop(1,'#0066ff');
+    ctx.fillStyle=gc; ctx.fillRect(bx3,by3,bw*prog,bh);
+    ctx.shadowColor='#00eeff'; ctx.shadowBlur=10;
+    ctx.fillStyle='#00eeff'; ctx.font='bold 11px Courier New'; ctx.textAlign='center';
+    ctx.fillText('⚡ MEGA DASH ⚡', VW/2, by3+bh+12);
+    ctx.shadowBlur=0;
+  }
+
+  // ── MINIMAP — top right ──
+  drawMinimap();
+
+  // ── WAVE BREAK indicator ──
+  if(waveBreakTimer>0){
+    const prog=waveBreakTimer/120;
+    const plsx=Math.round(sx(player.x));
+    const plsy=Math.round(sy(player.y));
+    const bw=160, bh=7;
+    const bx2=plsx-bw/2;
+    const by2=Math.max(28, plsy-54); // just above player, never off top
+    ctx.fillStyle='rgba(0,0,0,0.72)'; ctx.fillRect(bx2-3,by2-3,bw+6,bh+18);
+    ctx.fillStyle='#333'; ctx.fillRect(bx2,by2,bw,bh);
+    ctx.fillStyle='#00e5ff'; ctx.fillRect(bx2,by2,bw*prog,bh);
+    ctx.fillStyle='#00e5ff'; ctx.font='bold 11px Courier New'; ctx.textAlign='center';
+    ctx.fillText('⏳ NEW WAVE INCOMING…', plsx, by2+bh+11);
+  }
+
+  // ── WAVE ANNOUNCE — above player ──
+  if(waveAnnounce>0){
+    const alpha=waveAnnounce<40?waveAnnounce/40:1;
+    ctx.globalAlpha=alpha;
+    const isPurgeWave=wave%5===0;
+    const plsx=Math.round(sx(player.x));
+    const plsy=Math.round(sy(player.y));
+    const annY=Math.max(80, plsy-70);
+    ctx.fillStyle=isPurgeWave?'rgba(200,40,0,0.85)':'rgba(0,0,0,0.78)';
+    const annW=250, annH=isPurgeWave?54:40;
+    ctx.fillRect(plsx-annW/2, annY-annH, annW, annH);
+    ctx.fillStyle=isPurgeWave?'#ff4444':'#e8ff00';
+    ctx.font='bold 22px Courier New'; ctx.textAlign='center';
+    ctx.fillText('WAVE '+wave+(isPurgeWave?' — PURGE!':'!'), plsx, annY-annH+22);
+    if(isPurgeWave){
+      ctx.fillStyle='#ffeb3b'; ctx.font='bold 12px Courier New';
+      ctx.fillText('⚡ ALL ZOMBIES ANNIHILATED ⚡', plsx, annY-annH+40);
+    } else {
+      ctx.fillStyle='#ff8888'; ctx.font='12px Courier New';
+      ctx.fillText('HORDE: '+targetCount, plsx, annY-annH+36);
+    }
+    ctx.globalAlpha=1;
+  }
+}
+
+function drawGameOver(){
+  ctx.fillStyle='rgba(0,0,0,0.78)';ctx.fillRect(0,0,VW,VH);
+  ctx.fillStyle='#ff4444';ctx.font='bold 30px Courier New';ctx.textAlign='center';
+  ctx.fillText('GAME OVER',VW/2,VH/2-40);
+  ctx.fillStyle='#e8ff00';ctx.font='16px Courier New';
+  ctx.fillText('SCORE: '+score,VW/2,VH/2+2);
+  ctx.fillStyle='#aaa';ctx.font='12px Courier New';
+  ctx.fillText('WAVE '+wave+' | '+totalKills+' ZOMBIES',VW/2,VH/2+28);
+}
+
+function drawSlowMoOverlay(){
+  if(!fx.slowMo.active) return;
+  const alpha=0.28*(fx.slowMo.timer/fx.slowMo.max);
+  ctx.fillStyle='rgba(20,40,120,'+alpha+')';
+  ctx.fillRect(0,0,VW,VH);
+  // Vignette (darker edges)
+  const grad=ctx.createRadialGradient(VW/2,VH/2,VH*0.25,VW/2,VH/2,VH*0.8);
+  grad.addColorStop(0,'rgba(0,20,80,0)');
+  grad.addColorStop(1,'rgba(0,10,60,'+(alpha*1.5)+')');
+  ctx.fillStyle=grad; ctx.fillRect(0,0,VW,VH);
+}
+
+function drawPauseButton(){
+  const bx=VW-44, by=VH-44, bw=36, bh=36;
+  ctx.fillStyle='rgba(0,0,0,0.65)';
+  ctx.fillRect(bx,by,bw,bh);
+  ctx.strokeStyle='#555'; ctx.lineWidth=1.5;
+  ctx.strokeRect(bx,by,bw,bh);
+  if(isPaused){
+    // Play triangle
+    ctx.fillStyle='#e8ff00';
+    ctx.beginPath();
+    ctx.moveTo(bx+10,by+8); ctx.lineTo(bx+10,by+28); ctx.lineTo(bx+28,by+18);
+    ctx.closePath(); ctx.fill();
+  } else {
+    // Pause bars
+    ctx.fillStyle='#ffffff';
+    ctx.fillRect(bx+9, by+9, 6, 18);
+    ctx.fillRect(bx+21, by+9, 6, 18);
+  }
+}
+
+function drawPauseScreen(){
+  ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.fillRect(0,0,VW,VH);
+  ctx.fillStyle='#e8ff00'; ctx.font='bold 28px Courier New'; ctx.textAlign='center';
+  ctx.fillText('PAUSE',VW/2,VH/2-10);
+  ctx.fillStyle='#ffffff'; ctx.font='18px Courier New';
+  ctx.fillText('tap ▶ to resume',VW/2,VH/2+16);
+
+  // ── INVINCIBLE MODE checkbox ──
+  const cbSize = 22;
+  const cbX = VW/2 - 90;
+  const cbY = VH/2 + 48;
+  // Box
+  ctx.strokeStyle = invincibleMode ? '#00eeff' : '#888';
+  ctx.lineWidth = 2.5;
+  ctx.fillStyle = invincibleMode ? 'rgba(0,200,255,0.18)' : 'rgba(255,255,255,0.05)';
+  ctx.beginPath();
+  ctx.roundRect(cbX, cbY, cbSize, cbSize, 4);
+  ctx.fill(); ctx.stroke();
+  // Checkmark
+  if(invincibleMode){
+    ctx.strokeStyle='#00eeff'; ctx.lineWidth=3; ctx.lineCap='round'; ctx.lineJoin='round';
+    ctx.beginPath();
+    ctx.moveTo(cbX+4, cbY+11); ctx.lineTo(cbX+9, cbY+17); ctx.lineTo(cbX+18, cbY+5);
+    ctx.stroke();
+    ctx.lineCap='butt';
+  }
+  // Label
+  ctx.fillStyle = invincibleMode ? '#00eeff' : '#aaaaaa';
+  ctx.font = invincibleMode ? 'bold 15px Courier New' : '15px Courier New';
+  ctx.textAlign = 'left';
+  ctx.fillText('INVINCIBLE MODE', cbX + cbSize + 10, cbY + 16);
+  ctx.textAlign = 'center';
+}
+
+// Store checkbox hit area for tap detection
+const INVINC_CB = { x: VW/2 - 90, y: 0, w: 220, h: 30 };
+function updateInvincCbY(){ INVINC_CB.y = VH/2 + 48; }
+function loop(timestamp){
+  // ── Fixed timestep: always run logic at 60fps regardless of display hz ──
+  if(!lastTimestamp) lastTimestamp = timestamp;
+  let dt = timestamp - lastTimestamp;
+  lastTimestamp = timestamp;
+  // Cap dt to 100ms to avoid spiral of death after tab switch / sleep
+  if(dt > 100) dt = 100;
+  accumulator += dt;
+
+  drawStands();
+  drawPitch();
+  if(!gameOver){
+    // Run as many 60fps logic ticks as needed to catch up
+    while(accumulator >= FIXED_DT){
+      if(!isPaused){
+        if(oneUpFX.phase===0) update();
+        else { updateOneUpFX(); updateCamera(); }
+      }
+      accumulator -= FIXED_DT;
+    }
+    drawParticles();
+    drawPowerups();
+    drawThunderbolts();
+    drawFireTrails();
+    drawBiomeObstacles();
+    drawMegaDashTrail();
+    drawBall();
+    drawBallFire();
+    drawBall2();
+    drawOrbitBalls();
+    zombies.slice().sort((a,b)=>a.y-b.y).forEach(z=>{ drawZombie(z); drawZombieFire(z); });
+    drawSamuraiGhosts();
+    drawPlayer();
+    drawNinjaCostume();
+    drawSamuraiSword();
+    drawShotgunAim();
+    drawSlowMoOverlay();
+    drawBiomeFilter();
+    drawSnowflakes();
+    drawJoystick();
+    drawUI();
+    drawMegaDashButton();
+    drawOneUpFX();
+    drawActiveFX();
+    drawPauseButton();
+    if(isPaused) drawPauseScreen();
+    loopId=requestAnimationFrame(loop);
+  } else {
+    drawParticles();
+    zombies.forEach(drawZombie);
+    drawPlayer();
+    drawUI();
+    drawGameOver();
+    setTimeout(()=>{
+      const fs=document.getElementById('final-score');
+      fs.style.display='block';
+      fs.textContent='Score: '+score+' — Wave '+wave+' — '+totalKills+' zombies killed';
+      document.getElementById('startBtn').textContent='PLAY AGAIN';
+      document.getElementById('overlay').style.display='flex';
+    },1800);
+  }
+}
+</script>
+</body>
+</html>
