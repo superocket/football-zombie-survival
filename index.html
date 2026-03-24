@@ -398,6 +398,42 @@ const SFX = {
       setTimeout(()=>{ tone(180,'sine',0.05,0.3,90); },220); // chamber close
     }catch(e){}
   },
+  giantLeap(){
+    throttleSfx('gl',400,()=>{
+      try{
+        const ac=getAC(), t0=ac.currentTime;
+        // Heavy grunt launch
+        const o=ac.createOscillator(), g=ac.createGain();
+        o.type='sawtooth';
+        o.frequency.setValueAtTime(90+Math.random()*30, t0);
+        o.frequency.exponentialRampToValueAtTime(40, t0+0.35);
+        g.gain.setValueAtTime(0.6, t0);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0+0.38);
+        const f=ac.createBiquadFilter(); f.type='lowpass'; f.frequency.value=500;
+        o.connect(f); f.connect(g); g.connect(ac.destination);
+        o.start(); o.stop(t0+0.4);
+        noise(0.2, 0.3, 200);
+      }catch(e){}
+    });
+  },
+  giantLand(){
+    try{
+      const ac=getAC(), t0=ac.currentTime;
+      // Massive ground impact boom
+      const o=ac.createOscillator(), g=ac.createGain();
+      o.type='sine';
+      o.frequency.setValueAtTime(60, t0);
+      o.frequency.exponentialRampToValueAtTime(18, t0+0.45);
+      g.gain.setValueAtTime(0.9, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0+0.5);
+      o.connect(g); g.connect(ac.destination);
+      o.start(); o.stop(t0+0.52);
+      noise(0.35, 0.7, 120);
+      setTimeout(()=>noise(0.2, 0.4, 80), 60);
+      // Crack high freq
+      noise(0.06, 0.5, 1800);
+    }catch(e){}
+  },
 };
 
 // ══════════════════════════════════════
@@ -459,10 +495,10 @@ function getCurrentBiomeColors(){
 function spawnBiomeObstacles(){
   biomeObstacles = [];
   if(biome===0) return;
-  const count = biome===1 ? 16 : biome===2 ? 0 : 20; // trees/graves — ×2
+  const count = biome===1 ? 48 : biome===2 ? 0 : 60; // trees/graves — ×3
   const margin = 80;
   let attempts=0;
-  while(biomeObstacles.length<count && attempts<400){
+  while(biomeObstacles.length<count && attempts<1200){
     attempts++;
     const ox = PITCH.x+margin + Math.random()*(PITCH.w-margin*2);
     const oy = PITCH.y+margin + Math.random()*(PITCH.h-margin*2);
@@ -490,6 +526,13 @@ function updateBiome(){
     biomePrev = biome;
     biome = newBiome;
     biomeTransition = 0;
+    // Reset boss so it can spawn again on the new biome
+    if(!snake.active && snake.everSpawned){
+      snake.everSpawned = false;
+      snake.dead = false;
+      snake.hp = SNAKE_HP_MAX;
+      snake.announced = false;
+    }
     // Spawn obstacles for new biome
     spawnBiomeObstacles();
     // Init snowflakes for snow biome
@@ -624,6 +667,1022 @@ function drawSnowflakes(){
 }
 
 // ══════════════════════════════════════
+// BOSS : SERPENT SQUELETTE DU DÉSERT
+// ══════════════════════════════════════
+const SNAKE_SEGMENTS = 14;   // nb segments du corps
+const SNAKE_SEG_DIST = 18;   // distance monde entre segments
+const SNAKE_SPEED    = 1.8;  // vitesse de déplacement
+const SNAKE_HP_MAX   = 10;   // 10 coups pour tuer
+const SNAKE_HEAD_R   = 26;   // rayon collision tête (demi-côté du carré)
+
+const snake = {
+  active:    false,
+  hp:        SNAKE_HP_MAX,
+  dead:      false,
+  deadTimer: 0,
+  everSpawned: false,
+  firstBossDefeated: false, // true après la mort du 1er boss (désert)
+  // États : 'surfacing'(émerge)|'roaming'(rampe)|'diving'(plonge)|'hidden'(sous terre)
+  state:     'hidden',
+  stateTimer: 0,
+  // Segments : [{x,y}] — index 0 = tête
+  segs:      [],
+  // Direction de la tête
+  angle:     0,
+  turnSpeed: 0.032,
+  targetAngle: 0,
+  // Timer pour changer de direction (mouvement aléatoire)
+  dirChangeTimer: 0,
+  // Boules de feu tirées
+  fireballs: [],
+  fireTimer: 0,
+  // Position de surface/plongée
+  surfaceX: 0, surfaceY: 0,
+  // Flash quand touché
+  hitFlash: 0,
+  // Annonce boss
+  announced: false,
+  // Timer de respawn (caché sous terre)
+  hiddenTimer: 0,
+  // Alpha pour emerge/dive anim
+  alpha: 0,
+  // Shake segments when hit
+  shakeTimer: 0,
+  // Animation terre (émergence et plongée)
+  earthBurst: null,   // { x, y, timer, maxTimer, type:'emerge'|'dive' }
+  diveX: 0, diveY: 0, // position où le serpent commence à plonger
+};
+
+function initSnakeBoss(){
+  if(snake.active || snake.dead) return;
+  snake.active    = true;
+  snake.hp        = SNAKE_HP_MAX;
+  snake.dead      = false;
+  snake.deadTimer = 0;
+  snake.everSpawned = true;
+  snake.state     = 'hidden';
+  snake.stateTimer= 0;
+  snake.hiddenTimer= 1; // surface immédiatement
+  snake.announced = false;
+  snake.fireballs = [];
+  snake.fireTimer = 0;
+  snake.alpha     = 0;
+  snake.shakeTimer= 0;
+  // Éliminer tous les zombies à l'écran (explosion dramatique)
+  for(const z of zombies){
+    if(z.dead) continue;
+    if(z.id==='giant'){
+      const a=Math.random()*Math.PI*2;
+      damageGiant(z, Math.cos(a), Math.sin(a));
+    } else {
+      z.dead=true; z.deadAnim=38;
+      const a=Math.random()*Math.PI*2;
+      z.knockX=Math.cos(a)*6; z.knockY=Math.sin(a)*6; z.flyingCorpse=true;
+      goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.skin||'#9e9e9e');
+    }
+  }
+  // Première surface position au bord de l'écran visible
+  _snakePickSurfacePos();
+  // Init segments groupés au point de surface
+  snake.segs = [];
+  for(let i=0;i<SNAKE_SEGMENTS;i++){
+    snake.segs.push({x: snake.surfaceX, y: snake.surfaceY});
+  }
+  snake.angle = Math.random()*Math.PI*2;
+  snake.targetAngle = snake.angle;
+  // Annonce
+  sfxSnakeBossAppear();
+
+  // ── BOSS : double les power-ups sur le terrain ──
+  // Spawn 6 power-ups supplémentaires d'un coup (2× la normale de 3)
+  for(let i=0;i<6;i++) spawnPowerup();
+  // Réduire l'intervalle de spawn de power-ups de moitié pendant le boss
+  powerupExtraInterval = Math.round((2*60) + Math.random()*60); // 2–3s au lieu de 4–6s
+  powerupExtraTimer = 0;
+
+  // ── BOSS : activer le spawn lent de zombies (max 10, un par un) ──
+  snake.bossZombieSpawnTimer = 0;
+  snake.bossZombieSpawnRate = 180; // 1 zombie toutes les 3 secondes (180 frames)
+}
+
+function _snakePickSurfacePos(){
+  // Choisit un point visible à l'écran, dans le pitch, loin du joueur
+  let attempts=0, wx, wy;
+  do {
+    // Point aléatoire dans la zone visible de la caméra
+    const marginWX = (VW/2)/ZOOM * 0.7;
+    const marginWY = (VH/2)/ZOOM * 0.7;
+    wx = cam.x + (Math.random()-0.5)*2*marginWX;
+    wy = cam.y + (Math.random()-0.5)*2*marginWY;
+    wx = Math.max(PITCH.x+40, Math.min(PITCH.x+PITCH.w-40, wx));
+    wy = Math.max(PITCH.y+40, Math.min(PITCH.y+PITCH.h-40, wy));
+    attempts++;
+  } while(attempts<30 && Math.hypot(wx-player.x, wy-player.y)<120);
+  snake.surfaceX = wx;
+  snake.surfaceY = wy;
+}
+
+// ── SFX serpent ──
+function sfxSnakeBossAppear(){
+  throttleSfx('snk',300,()=>{
+    try{
+      const ac=getAC(), t0=ac.currentTime;
+      // Grondement sourd ascendant
+      const o=ac.createOscillator(), g=ac.createGain(), f=ac.createBiquadFilter();
+      o.type='sawtooth';
+      o.frequency.setValueAtTime(40,t0); o.frequency.exponentialRampToValueAtTime(120,t0+0.6);
+      f.type='lowpass'; f.frequency.value=400;
+      g.gain.setValueAtTime(0.6,t0); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.7);
+      o.connect(f); f.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+0.75);
+      noise(0.4,0.25,150);
+      setTimeout(()=>{ noise(0.25,0.18,80); }, 200);
+    }catch(e){}
+  });
+}
+function sfxSnakeHit(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    // Craquement osseux sec
+    noise(0.06,0.55,1800); noise(0.04,0.35,800);
+    const o=ac.createOscillator(), g=ac.createGain();
+    o.type='square'; o.frequency.setValueAtTime(220,t0); o.frequency.exponentialRampToValueAtTime(60,t0+0.1);
+    g.gain.setValueAtTime(0.4,t0); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.12);
+    o.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+0.13);
+  }catch(e){}
+}
+function sfxSnakeDie(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    [0,0.1,0.2,0.35,0.5].forEach((dt,i)=>{
+      noise(0.12-i*0.02, 0.5-i*0.08, 600-i*80);
+    });
+    const o=ac.createOscillator(), g=ac.createGain();
+    o.type='sawtooth'; o.frequency.setValueAtTime(80,t0); o.frequency.exponentialRampToValueAtTime(15,t0+0.9);
+    g.gain.setValueAtTime(0.7,t0); g.gain.exponentialRampToValueAtTime(0.0001,t0+1.0);
+    o.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+1.0);
+  }catch(e){}
+}
+function sfxSnakeFireball(){
+  throttleSfx('snkf',200,()=>{
+    try{
+      const ac=getAC(), t0=ac.currentTime;
+      const o=ac.createOscillator(), g=ac.createGain(), f=ac.createBiquadFilter();
+      o.type='sawtooth'; o.frequency.setValueAtTime(280,t0); o.frequency.exponentialRampToValueAtTime(80,t0+0.22);
+      f.type='bandpass'; f.frequency.value=600; f.Q.value=0.8;
+      g.gain.setValueAtTime(0.35,t0); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.25);
+      o.connect(f); f.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+0.26);
+      noise(0.1,0.2,800);
+    }catch(e){}
+  });
+}
+function sfxSnakeDive(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    const o=ac.createOscillator(), g=ac.createGain();
+    o.type='sawtooth'; o.frequency.setValueAtTime(110,t0); o.frequency.exponentialRampToValueAtTime(30,t0+0.4);
+    g.gain.setValueAtTime(0.4,t0); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.42);
+    o.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+0.44);
+    noise(0.3,0.2,100);
+  }catch(e){}
+}
+
+// SFX : explosion de terre (émergence et plongée)
+function sfxSnakeEarthBurst(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    // Grondement sourd profond
+    const o=ac.createOscillator(), g=ac.createGain(), f=ac.createBiquadFilter();
+    o.type='sawtooth';
+    o.frequency.setValueAtTime(28, t0);
+    o.frequency.exponentialRampToValueAtTime(65, t0+0.18);
+    o.frequency.exponentialRampToValueAtTime(22, t0+0.55);
+    f.type='lowpass'; f.frequency.value=280;
+    g.gain.setValueAtTime(0.75, t0);
+    g.gain.linearRampToValueAtTime(0.55, t0+0.18);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0+0.6);
+    o.connect(f); f.connect(g); g.connect(ac.destination);
+    o.start(); o.stop(t0+0.62);
+    // Impact de débris : plusieurs bursts de bruit
+    noise(0.12, 0.7, 180);
+    setTimeout(()=>noise(0.1, 0.5, 120+Math.random()*60), 60);
+    setTimeout(()=>noise(0.08, 0.35, 90+Math.random()*40), 140);
+    setTimeout(()=>noise(0.06, 0.2, 150+Math.random()*80), 230);
+    // Craquement de surface — clic sec haute fréquence
+    setTimeout(()=>{
+      try{
+        const ac2=getAC(), t1=ac2.currentTime;
+        const oc=ac2.createOscillator(), gc=ac2.createGain();
+        oc.type='square';
+        oc.frequency.setValueAtTime(900+Math.random()*300, t1);
+        oc.frequency.exponentialRampToValueAtTime(120, t1+0.08);
+        gc.gain.setValueAtTime(0.3, t1);
+        gc.gain.exponentialRampToValueAtTime(0.0001, t1+0.1);
+        oc.connect(gc); gc.connect(ac2.destination);
+        oc.start(); oc.stop(t1+0.11);
+        noise(0.05, 0.28, 600+Math.random()*200);
+      }catch(e){}
+    }, 80);
+  }catch(e){}
+}
+
+// SFX : mouvement du serpent sur le terrain (slither)
+let _snakeSlitherLast=0;
+function sfxSnakeSlither(){
+  const now=Date.now();
+  if(now-_snakeSlitherLast < 320) return;
+  _snakeSlitherLast=now;
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    // Son de frottement / glissement — bruit filtré grave modulé
+    const len=Math.floor(ac.sampleRate*0.22);
+    const buf=ac.createBuffer(1,len,ac.sampleRate), d=buf.getChannelData(0);
+    for(let i=0;i<len;i++) d[i]=(Math.random()*2-1);
+    const src=ac.createBufferSource(); src.buffer=buf;
+    const f1=ac.createBiquadFilter(); f1.type='bandpass'; f1.frequency.value=140+Math.random()*60; f1.Q.value=1.4;
+    const f2=ac.createBiquadFilter(); f2.type='lowpass'; f2.frequency.value=320;
+    const g=ac.createGain();
+    g.gain.setValueAtTime(0.0, t0);
+    g.gain.linearRampToValueAtTime(0.16, t0+0.04);
+    g.gain.linearRampToValueAtTime(0.13, t0+0.14);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0+0.22);
+    src.connect(f1); f1.connect(f2); f2.connect(g); g.connect(ac.destination);
+    src.start(); src.stop(t0+0.23);
+    // Frottement supplémentaire — légère résonance grave
+    const o=ac.createOscillator(), go=ac.createGain();
+    o.type='sine';
+    o.frequency.setValueAtTime(55+Math.random()*20, t0);
+    o.frequency.linearRampToValueAtTime(38+Math.random()*15, t0+0.18);
+    go.gain.setValueAtTime(0.07, t0);
+    go.gain.exponentialRampToValueAtTime(0.0001, t0+0.2);
+    o.connect(go); go.connect(ac.destination);
+    o.start(); o.stop(t0+0.21);
+  }catch(e){}
+}
+
+function updateSnakeBoss(){
+  if(!snake.active) return;
+
+  // ── Gestion mort ──
+  if(snake.dead){
+    snake.deadTimer--;
+    snake.alpha = Math.max(0, snake.alpha - 0.025);
+    // Faire s'effondrer les segments visuellement
+    for(let i=0;i<snake.segs.length;i++){
+      const s=snake.segs[i];
+      s.y += 0.4 + i*0.05; // tombe dans la terre
+    }
+    if(snake.deadTimer<=0){
+      snake.active=false;
+      // Marquer le 1er boss comme vaincu (si c'était au désert)
+      if(biome===1 && !snake.firstBossDefeated) snake.firstBossDefeated=true;
+      // Big score bonus
+      score += 500; totalKills++;
+      scorePopup(snake.segs[0].x, snake.segs[0].y, 500);
+      // ── Restaurer l'intervalle normal des power-ups ──
+      powerupExtraInterval = Math.round((4*60) + Math.random()*2*60); // retour 4–6s
+      powerupExtraTimer = 0;
+    }
+    return;
+  }
+
+  snake.stateTimer--;
+  if(snake.hitFlash>0) snake.hitFlash--;
+  if(snake.shakeTimer>0) snake.shakeTimer--;
+  // Tick animation terre
+  if(snake.earthBurst){ snake.earthBurst.timer--; if(snake.earthBurst.timer<=0) snake.earthBurst=null; }
+
+  // ── Machine d'états ──
+  if(snake.state==='hidden'){
+    snake.hiddenTimer--;
+    if(snake.hiddenTimer<=0){
+      // Surface !
+      _snakePickSurfacePos();
+      for(const s of snake.segs){ s.x=snake.surfaceX; s.y=snake.surfaceY; }
+      snake.state='surfacing';
+      snake.stateTimer=70; // 70f pour émerger
+      snake.alpha=0;
+      snake.angle=Math.random()*Math.PI*2;
+      snake.targetAngle=snake.angle;
+      snake.dirChangeTimer=0;
+      // Animation terre — débris d'abord, serpent sort après 35 frames
+      snake.earthBurst={ x:snake.surfaceX, y:snake.surfaceY, timer:70, maxTimer:70, type:'emerge' };
+      sfxSnakeBossAppear();
+      sfxSnakeEarthBurst();
+      screenBlast(8);
+      // Particules de sable à la surface
+      for(let i=0;i<20;i++){
+        const a=Math.random()*Math.PI*2, spd=1+Math.random()*3;
+        particles.push({x:snake.surfaceX,y:snake.surfaceY,
+          vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-2,
+          life:60,maxLife:60,color:i%2===0?'#c8a96e':'#b89558',
+          sz:3+Math.random()*4,type:'dirt',gravity:0.15,
+          bounceCount:0,landed:false,groundY:snake.surfaceY+8,
+          rot:Math.random()*Math.PI*2,rotV:(Math.random()-0.5)*0.2});
+      }
+      if(!snake.announced){
+        snake.announced=true;
+        // Announce banner via particule texte
+        particles.push({x:cam.x,y:cam.y-40,vx:0,vy:-0.3,
+          life:180,maxLife:180,color:'#ff4400',sz:0,text:'⚠ BOSS !'});
+      }
+    }
+    return;
+  }
+
+  if(snake.state==='surfacing'){
+    // Serpent n'apparaît qu'après la première moitié de l'animation de terre
+    const burstProgress = snake.earthBurst ? (snake.earthBurst.maxTimer - snake.earthBurst.timer) / snake.earthBurst.maxTimer : 1;
+    if(burstProgress >= 0.45){
+      snake.alpha = Math.min(1, snake.alpha + 1.4/70);
+    }
+    if(snake.stateTimer<=0){
+      snake.state='roaming';
+      snake.stateTimer = 280 + Math.floor(Math.random()*180); // 4.7–7.7s en surface
+      snake.fireTimer = 80;
+    }
+    // Pendant surfacing déjà un peu de mouvement
+    _snakeMove(0.5);
+    return;
+  }
+
+  if(snake.state==='roaming'){
+    snake.alpha = 1;
+    _snakeMove(1.0);
+    // Son de déplacement du serpent sur le terrain
+    sfxSnakeSlither();
+
+    // Tirer une boule de feu périodiquement
+    snake.fireTimer--;
+    if(snake.fireTimer<=0){
+      _snakeShootFireball();
+      snake.fireTimer = 90 + Math.floor(Math.random()*60);
+    }
+
+    // Attaque joueur au contact (tête)
+    const head=snake.segs[0];
+    const dPlayer=Math.hypot(head.x-player.x, head.y-player.y);
+    if(dPlayer < SNAKE_HEAD_R+player.w/2){
+      if(!invincibleMode && !megaDash.active && !samurai.active){
+        if(frameCount%30===0){
+          player.hp -= 15;
+          player.hitFlash=18; player.stunned=40;
+          const ka=Math.atan2(player.y-head.y,player.x-head.x);
+          player.knockX=Math.cos(ka)*8; player.knockY=Math.sin(ka)*8;
+          SFX.playerScream(); screenBlast(12);
+        }
+      }
+    }
+
+    // ── Collision corps du serpent (segments 1+) → joueur projeté + blessé ──
+    if(!invincibleMode && !megaDash.active && !samurai.active){
+      const BODY_SEG_R = 14; // rayon de collision de chaque segment de corps
+      for(let si=1; si<snake.segs.length; si++){
+        const seg=snake.segs[si];
+        const dSeg=Math.hypot(seg.x-player.x, seg.y-player.y);
+        if(dSeg < BODY_SEG_R + player.w/2){
+          if(frameCount%40===0){
+            player.hp -= 8;
+            player.hitFlash=14; player.stunned=40;
+            const ka=Math.atan2(player.y-seg.y, player.x-seg.x);
+            // Projection plus forte selon la vitesse du serpent
+            player.knockX=Math.cos(ka)*10; player.knockY=Math.sin(ka)*10;
+            SFX.playerScream(); screenBlast(8);
+          }
+          break; // un seul hit par frame (évite dommages multiples)
+        }
+      }
+    }
+
+    if(snake.stateTimer<=0){
+      snake.state='diving';
+      snake.stateTimer=50;
+      // Mémoriser la position de plongée pour l'animation de terre
+      snake.diveX = snake.segs[0].x;
+      snake.diveY = snake.segs[0].y;
+      snake.earthBurst={ x:snake.diveX, y:snake.diveY, timer:50, maxTimer:50, type:'dive' };
+      sfxSnakeDive();
+      sfxSnakeEarthBurst();
+    }
+    return;
+  }
+
+  if(snake.state==='diving'){
+    const N2 = snake.segs.length;
+
+    // Initialisation au premier frame de plongée
+    if(!snake.diveProgress){
+      snake.diveProgress = 0;
+      // Position du trou = position actuelle de la tête
+      snake.holeX = snake.segs[0].x;
+      snake.holeY = snake.segs[0].y;
+      snake.segAlphas = new Array(N2).fill(1);
+    }
+
+    // Vitesse d'avancement : chaque segment "arrive" au trou à son tour
+    // diveProgress va de 0 à N2, un segment par ~5 frames
+    snake.diveProgress += 1 / 5;
+
+    // Pour chaque segment : le faire glisser physiquement vers le trou
+    // Le segment i commence à bouger quand diveProgress >= i*0.5
+    // et disparaît (alpha=0) une fois arrivé au trou
+    for(let i = 0; i < N2; i++){
+      const startMove = i * 0.6; // décalage : chaque segment suit le précédent
+      if(snake.diveProgress < startMove) continue;
+
+      const seg = snake.segs[i];
+      const dx = snake.holeX - seg.x;
+      const dy = snake.holeY - seg.y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+
+      if(dist > 3){
+        // Vitesse d'attraction vers le trou — accélère à mesure qu'il s'approche
+        const spd = Math.min(dist, 4 + (snake.diveProgress - startMove) * 0.8);
+        seg.x += (dx / dist) * spd;
+        seg.y += (dy / dist) * spd;
+        snake.segAlphas[i] = Math.min(1, dist / 30); // fondu quand très proche du trou
+      } else {
+        // Arrivé au trou — snap et disparaît
+        seg.x = snake.holeX;
+        seg.y = snake.holeY;
+        snake.segAlphas[i] = 0;
+      }
+
+      // Particules de sable autour du trou quand le segment plonge
+      if(snake.segAlphas[i] > 0 && snake.segAlphas[i] < 0.8 && frameCount%3===0){
+        const pa = Math.random()*Math.PI*2, pspd = 0.8+Math.random()*2;
+        particles.push({x:snake.holeX, y:snake.holeY,
+          vx:Math.cos(pa)*pspd, vy:Math.sin(pa)*pspd - 1.2,
+          life:20, maxLife:20,
+          color:Math.random()<0.5?'#8b6914':'#a07828',
+          sz:2+Math.random()*3, type:'star'});
+      }
+    }
+
+    // alpha global = max des segments encore visibles
+    snake.alpha = Math.max(...snake.segAlphas);
+
+    // Fin : tous les segments sont dans le trou
+    const allIn = snake.segAlphas.every(a => a <= 0);
+    if(allIn){
+      snake.state = 'hidden';
+      snake.hiddenTimer = 120;
+      snake.alpha = 0;
+      snake.diveProgress = 0;
+      snake.segAlphas = null;
+    }
+    return;
+  }
+}
+
+function _snakeMove(speedMult){
+  // Changement de direction aléatoire
+  snake.dirChangeTimer--;
+  if(snake.dirChangeTimer<=0){
+    snake.targetAngle = Math.random()*Math.PI*2;
+    snake.dirChangeTimer = 40 + Math.floor(Math.random()*80);
+  }
+
+  // Légère attraction vers le joueur (30% du temps)
+  if(Math.random()<0.008){
+    const head=snake.segs[0];
+    snake.targetAngle=Math.atan2(player.y-head.y, player.x-head.x);
+  }
+
+  // Steering fluide
+  let da = snake.targetAngle - snake.angle;
+  while(da>Math.PI) da-=Math.PI*2;
+  while(da<-Math.PI) da+=Math.PI*2;
+  snake.angle += Math.sign(da)*Math.min(Math.abs(da), snake.turnSpeed);
+
+  // Déplacer la tête
+  const head=snake.segs[0];
+  const spd=SNAKE_SPEED*speedMult*(fx.slowMo.active?0.2:1);
+  head.x += Math.cos(snake.angle)*spd;
+  head.y += Math.sin(snake.angle)*spd;
+
+  // Garder dans le pitch (rebondir)
+  const margin=30;
+  if(head.x<PITCH.x+margin){ head.x=PITCH.x+margin; snake.targetAngle=Math.PI-snake.targetAngle; }
+  if(head.x>PITCH.x+PITCH.w-margin){ head.x=PITCH.x+PITCH.w-margin; snake.targetAngle=Math.PI-snake.targetAngle; }
+  if(head.y<PITCH.y+margin){ head.y=PITCH.y+margin; snake.targetAngle=-snake.targetAngle; }
+  if(head.y>PITCH.y+PITCH.h-margin){ head.y=PITCH.y+PITCH.h-margin; snake.targetAngle=-snake.targetAngle; }
+
+  // Garder visible à l'écran (nudge fort — serpent doit TOUJOURS rester visible)
+  const screenMX=(VW/2-80)/ZOOM, screenMY=(VH/2-80)/ZOOM;
+  const offX = head.x - cam.x, offY = head.y - cam.y;
+  if(Math.abs(offX) > screenMX){
+    // Redirection forte vers le centre de l'écran
+    snake.targetAngle = Math.atan2(cam.y - head.y, cam.x - head.x);
+    // Nudge physique pour éviter de sortir
+    if(offX > screenMX)  head.x = Math.min(head.x, cam.x + screenMX);
+    if(offX < -screenMX) head.x = Math.max(head.x, cam.x - screenMX);
+  }
+  if(Math.abs(offY) > screenMY){
+    snake.targetAngle = Math.atan2(cam.y - head.y, cam.x - head.x);
+    if(offY > screenMY)  head.y = Math.min(head.y, cam.y + screenMY);
+    if(offY < -screenMY) head.y = Math.max(head.y, cam.y - screenMY);
+  }
+
+  // Chenille : chaque segment suit le précédent à SNAKE_SEG_DIST
+  for(let i=1;i<snake.segs.length;i++){
+    const prev=snake.segs[i-1], cur=snake.segs[i];
+    const dx=cur.x-prev.x, dy=cur.y-prev.y, d=Math.sqrt(dx*dx+dy*dy)||0.01;
+    if(d>SNAKE_SEG_DIST){
+      cur.x = prev.x + (dx/d)*SNAKE_SEG_DIST;
+      cur.y = prev.y + (dy/d)*SNAKE_SEG_DIST;
+    }
+  }
+}
+
+function _snakeShootFireball(){
+  const head=snake.segs[0];
+  // Vise le joueur
+  const dx=player.x-head.x, dy=player.y-head.y, d=Math.sqrt(dx*dx+dy*dy)||1;
+  snake.fireballs.push({
+    x:head.x, y:head.y,
+    vx:(dx/d)*3.2, vy:(dy/d)*3.2,
+    life:180, r:8,
+    phase:Math.random()*Math.PI*2,
+  });
+  sfxSnakeFireball();
+  // Particule d'embrasement à la bouche
+  for(let i=0;i<8;i++){
+    const a=Math.atan2(dy,dx)+(Math.random()-0.5)*0.6;
+    particles.push({x:head.x,y:head.y,vx:Math.cos(a)*2,vy:Math.sin(a)*2,
+      life:16,maxLife:16,color:i%2===0?'#ff6d00':'#ffeb3b',sz:3+Math.random()*4,type:'star'});
+  }
+}
+
+function updateSnakeFireballs(){
+  if(!snake.active) return;
+  for(let i=snake.fireballs.length-1;i>=0;i--){
+    const fb=snake.fireballs[i];
+    fb.x+=fb.vx; fb.y+=fb.vy; fb.life--;
+    fb.phase+=0.18;
+    // Traîne de feu
+    if(frameCount%2===0){
+      particles.push({x:fb.x,y:fb.y,vx:(Math.random()-0.5)*0.8,vy:-0.4-Math.random()*0.6,
+        life:18,maxLife:18,color:Math.random()<0.5?'#ff6d00':'#ffeb3b',sz:3+Math.random()*3,type:'star'});
+    }
+    // Hors terrain
+    if(fb.life<=0||fb.x<PITCH.x||fb.x>PITCH.x+PITCH.w||fb.y<PITCH.y||fb.y>PITCH.y+PITCH.h){
+      // Petite explosion à disparition
+      for(let j=0;j<6;j++){
+        const a=Math.random()*Math.PI*2;
+        particles.push({x:fb.x,y:fb.y,vx:Math.cos(a)*1.5,vy:Math.sin(a)*1.5,
+          life:12,maxLife:12,color:'#ff9800',sz:3,type:'star'});
+      }
+      snake.fireballs.splice(i,1); continue;
+    }
+    // Touche le joueur
+    if(!invincibleMode && !megaDash.active){
+      if(Math.hypot(fb.x-player.x, fb.y-player.y)<fb.r+player.w/2){
+        player.hp-=12; player.hitFlash=18; player.stunned=40;
+        const ka=Math.atan2(player.y-fb.y,player.x-fb.x);
+        player.knockX=Math.cos(ka)*6; player.knockY=Math.sin(ka)*6;
+        SFX.playerScream(); screenBlast(8);
+        // Explosion au contact
+        for(let j=0;j<14;j++){
+          const a=Math.random()*Math.PI*2;
+          particles.push({x:fb.x,y:fb.y,vx:Math.cos(a)*2.5,vy:Math.sin(a)*2.5,
+            life:18,maxLife:18,color:j%2===0?'#ff6d00':'#ffeb3b',sz:4+Math.random()*4,type:'star'});
+        }
+        snake.fireballs.splice(i,1); continue;
+      }
+    }
+  }
+}
+
+function hitSnakeBoss(ballVx, ballVy){
+  if(!snake.active||snake.dead||snake.state==='hidden'||snake.state==='diving') return false;
+  snake.hp--;
+  snake.hitFlash=18;
+  snake.shakeTimer=12;
+  sfxSnakeHit();
+  screenBlast(7);
+  // Particules d'os brisés
+  for(let i=0;i<12;i++){
+    const a=Math.random()*Math.PI*2;
+    particles.push({x:snake.segs[0].x,y:snake.segs[0].y,
+      vx:Math.cos(a)*(2+Math.random()*3), vy:Math.sin(a)*(2+Math.random()*3)-1,
+      life:40,maxLife:40,color:i%3===0?'#eeeecc':i%3===1?'#ddddaa':'#c8a96e',
+      sz:2+Math.random()*4,type:'star'});
+  }
+  scorePopup(snake.segs[0].x, snake.segs[0].y-20, 50);
+  score+=50;
+
+  if(snake.hp<=0){
+    snake.dead=true;
+    snake.deadTimer=90;
+    bossKills++;
+    sfxSnakeDie();
+    screenBlast(20);
+    // Grande explosion d'os + sable
+    for(let i=0;i<40;i++){
+      const a=Math.random()*Math.PI*2, spd=2+Math.random()*6;
+      particles.push({x:snake.segs[Math.floor(Math.random()*snake.segs.length)].x,
+        y:snake.segs[Math.floor(Math.random()*snake.segs.length)].y,
+        vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-2,
+        life:60,maxLife:60,
+        color:i%4===0?'#eeeecc':i%4===1?'#c8a96e':i%4===2?'#ffeb3b':'#ff6d00',
+        sz:3+Math.random()*6,type:'chunk',gravity:0.18,
+        bounceCount:0,landed:false,rot:Math.random()*Math.PI*2,rotV:(Math.random()-0.5)*0.4,
+        groundY:snake.segs[0].y+15+Math.random()*20});
+    }
+    scorePopup(snake.segs[0].x, snake.segs[0].y-30, 500);
+  }
+  return true;
+}
+
+// ── Vérification collision balle ↔ serpent (TÊTE SEULEMENT) ──
+function checkBallSnakeHit(bx, by, bvx, bvy){
+  if(!snake.active||snake.dead||snake.state==='hidden'||snake.state==='diving'||snake.alpha<0.3) return false;
+  // Collision carrée sur la tête uniquement (index 0)
+  const head=snake.segs[0];
+  const HIT_R = SNAKE_HEAD_R + 6; // un peu de marge
+  if(Math.hypot(bx-head.x, by-head.y) < HIT_R){
+    hitSnakeBoss(bvx,bvy);
+    return true;
+  }
+  return false;
+}
+
+// ── DRAW SERPENT SQUELETTE ──
+function drawSnakeBoss(){
+  if(!snake.active) return;
+
+  // ── Trou persistant pendant la plongée ──
+  if(snake.state==='diving' && snake.holeX !== undefined){
+    const hbx = Math.round(sx(snake.holeX)), hby = Math.round(sy(snake.holeY));
+    ctx.save();
+    // Trou sombre pulsant
+    const holeR = 22 * ZOOM / 2.4;
+    const holeGrad = ctx.createRadialGradient(hbx, hby, 0, hbx, hby, holeR);
+    holeGrad.addColorStop(0, 'rgba(5,3,0,1)');
+    holeGrad.addColorStop(0.45, 'rgba(30,15,5,0.92)');
+    holeGrad.addColorStop(0.75, 'rgba(80,45,10,0.55)');
+    holeGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = holeGrad;
+    ctx.beginPath(); ctx.arc(hbx, hby, holeR, 0, Math.PI*2); ctx.fill();
+    // Fissures autour du trou
+    ctx.strokeStyle = 'rgba(40,20,5,0.7)'; ctx.lineWidth = 1.5;
+    for(let c=0;c<6;c++){
+      const ca = (c/6)*Math.PI*2;
+      const cl = holeR * (0.5 + 0.5*Math.sin(c*5.1+1.8));
+      ctx.beginPath();
+      ctx.moveTo(hbx + Math.cos(ca)*4, hby + Math.sin(ca)*4);
+      ctx.lineTo(hbx + Math.cos(ca)*cl, hby + Math.sin(ca)*cl);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ── Animation de terre (débris) — indépendante de l'alpha du serpent ──
+  if(snake.earthBurst){
+    const eb=snake.earthBurst;
+    const prog=(eb.maxTimer-eb.timer)/eb.maxTimer; // 0→1
+    const bx=Math.round(sx(eb.x)), by=Math.round(sy(eb.y));
+    ctx.save();
+    // Cratère / fissure au sol
+    const crackAlpha = eb.type==='emerge'
+      ? (prog<0.5 ? prog*2 : 1-(prog-0.5)*2)
+      : (prog<0.3 ? prog/0.3 : 1-(prog-0.3)/0.7);
+    ctx.globalAlpha=Math.max(0,crackAlpha)*0.9;
+    // Trou sombre au sol
+    const crR=(18+prog*28)*ZOOM/2.4;
+    const crGrad=ctx.createRadialGradient(bx,by,0,bx,by,crR);
+    crGrad.addColorStop(0,'rgba(20,10,5,0.95)');
+    crGrad.addColorStop(0.35,'rgba(60,30,10,0.75)');
+    crGrad.addColorStop(0.65,'rgba(100,60,20,0.4)');
+    crGrad.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=crGrad;
+    ctx.beginPath(); ctx.arc(bx,by,crR,0,Math.PI*2); ctx.fill();
+    // Fissures rayonnantes
+    ctx.strokeStyle=`rgba(40,20,5,${crackAlpha*0.85})`;
+    ctx.lineWidth=2;
+    const nCracks=8;
+    for(let c=0;c<nCracks;c++){
+      const a=(c/nCracks)*Math.PI*2;
+      const len=(crR*0.5+crR*0.5*Math.sin(c*7.3+1.2))*(0.5+prog*0.6);
+      ctx.beginPath();
+      ctx.moveTo(bx+Math.cos(a)*4, by+Math.sin(a)*4);
+      ctx.lineTo(bx+Math.cos(a)*len, by+Math.sin(a)*len);
+      ctx.stroke();
+    }
+    // Débris de terre projetés (particules dessinées directement ici pour timing précis)
+    if(prog<0.7){
+      const nD=14;
+      for(let d=0;d<nD;d++){
+        const seed=d*137.508;
+        const a=(seed%Math.PI*2);
+        const spd=prog*(2.5+((seed*3.7)%2.5));
+        const dx=Math.cos(a)*spd*crR*0.9;
+        const dy=Math.sin(a)*spd*crR*0.9 - prog*crR*1.4; // parabole vers le haut
+        const gravity=prog*prog*crR*1.2;
+        const dbx=bx+dx, dby=by+dy+gravity;
+        const dbr=Math.max(1,(3+((seed*2.1)%5))*(1-prog*0.6)*ZOOM/2.4);
+        ctx.globalAlpha=Math.max(0,(1-prog*1.3)*crackAlpha);
+        ctx.fillStyle=d%3===0?'#8b6914':d%3===1?'#a07828':'#6b4f0f';
+        ctx.beginPath(); ctx.arc(dbx, dby, dbr, 0, Math.PI*2); ctx.fill();
+      }
+    }
+    // Nuage de poussière
+    if(prog<0.8){
+      const dustAlpha=Math.max(0,(0.8-prog)*crackAlpha*0.55);
+      const dustR=crR*(0.9+prog*0.8);
+      const dustGrad=ctx.createRadialGradient(bx,by-dustR*0.3,0,bx,by,dustR);
+      dustGrad.addColorStop(0,`rgba(200,160,80,${dustAlpha})`);
+      dustGrad.addColorStop(0.5,`rgba(160,120,50,${dustAlpha*0.5})`);
+      dustGrad.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.globalAlpha=1;
+      ctx.fillStyle=dustGrad;
+      ctx.beginPath(); ctx.arc(bx,by-dustR*0.15,dustR,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  if(snake.alpha<=0) return;
+
+  const N=snake.segs.length;
+
+  // ── Corps : segments "vertèbres" ──
+  for(let i=N-1;i>=1;i--){
+    const s=snake.segs[i];
+    const scx=Math.round(sx(s.x)), scy=Math.round(sy(s.y));
+    const ratio=1-(i/N)*0.5;
+    const segR=Math.round((9-i*0.35)*ratio*ZOOM*0.92);
+    if(segR<2) continue;
+
+    // Alpha individuel pendant la plongée, sinon alpha global
+    const segA = (snake.state==='diving' && snake.segAlphas) ? snake.segAlphas[i] : 1;
+    if(segA <= 0) continue;
+
+    const shake = snake.shakeTimer>0 ? (Math.random()-0.5)*4 : 0;
+    const cx2=scx+shake;
+    const flashCol = snake.hitFlash>0&&frameCount%2===0;
+
+    ctx.save();
+    ctx.globalAlpha = snake.alpha * segA;
+
+    // Ombre douce
+    ctx.fillStyle='rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.arc(cx2+2, scy+3, segR*1.05, 0,Math.PI*2);
+    ctx.fill();
+
+    // ── PIQUES autour du segment ──
+    const nSpikes = 8;
+    const spikeLen = segR * 0.6;  // plus court
+    const spikeBase = segR * 0.14; // base très étroite = très pointu
+    const spikeColor = flashCol ? '#ff6666' : '#b8a050';
+    const spikeTip   = flashCol ? '#ffaaaa' : '#ffe080';
+    for(let k=0;k<nSpikes;k++){
+      const ang3 = (k / nSpikes) * Math.PI * 2 + (i * 0.4); // décalage par segment = effet spirale
+      const bx1 = cx2 + Math.cos(ang3) * (segR * 0.85);
+      const by1 = scy + Math.sin(ang3) * (segR * 0.85);
+      const tx2 = cx2 + Math.cos(ang3) * (segR + spikeLen);
+      const ty2 = scy + Math.sin(ang3) * (segR + spikeLen);
+      const lx2 = cx2 + Math.cos(ang3 - 0.12) * (segR * 0.9);
+      const ly2 = scy + Math.sin(ang3 - 0.12) * (segR * 0.9);
+      const rx2 = cx2 + Math.cos(ang3 + 0.12) * (segR * 0.9);
+      const ry2 = scy + Math.sin(ang3 + 0.12) * (segR * 0.9);
+      // Pique triangulaire
+      ctx.fillStyle=spikeColor;
+      ctx.beginPath();
+      ctx.moveTo(lx2, ly2);
+      ctx.lineTo(tx2, ty2);
+      ctx.lineTo(rx2, ry2);
+      ctx.closePath();
+      ctx.fill();
+      // Contour net pour accentuer la pointe
+      ctx.strokeStyle = flashCol ? '#ff9999' : '#8a6820';
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+    }
+
+    // Os vertèbre — CERCLE PARFAIT
+    const boneColor = flashCol ? '#ff4444' : (i%2===0?'#e8e0c0':'#d4cc9a');
+    ctx.fillStyle=boneColor;
+    ctx.beginPath();
+    ctx.arc(cx2, scy, segR, 0,Math.PI*2);
+    ctx.fill();
+    // Détail vertèbre (ligne centrale)
+    ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=1;
+    ctx.beginPath();
+    ctx.moveTo(cx2-segR+2, scy);
+    ctx.lineTo(cx2+segR-2, scy);
+    ctx.stroke();
+    // Particules de sable autour (désert)
+    if(biome===1 && frameCount%10===0 && i===Math.floor(N/2) && snake.state==='roaming'){
+      const a=Math.random()*Math.PI*2;
+      particles.push({x:s.x,y:s.y,vx:Math.cos(a)*0.4,vy:-0.3-Math.random()*0.4,
+        life:20,maxLife:20,color:'#c8a96e',sz:2,type:'star'});
+    }
+    ctx.restore(); // ferme le save par segment
+  }
+
+  // ── Tête — CARRÉE, plus grande que les segments ──
+  const head=snake.segs[0];
+  const hx=Math.round(sx(head.x)), hy=Math.round(sy(head.y));
+  const ang=snake.angle;
+  const shake0=snake.shakeTimer>0?(Math.random()-0.5)*5:0;
+  const flashH=snake.hitFlash>0&&frameCount%2===0;
+  const HS=26;
+
+  // Alpha de la tête pendant la plongée
+  const headA = (snake.state==='diving' && snake.segAlphas) ? snake.segAlphas[0] : 1;
+
+  ctx.save();
+  ctx.globalAlpha = snake.alpha * headA;
+  ctx.translate(hx+shake0, hy);
+  ctx.rotate(ang);
+
+  // Ombre tête (carré décalé)
+  ctx.fillStyle='rgba(0,0,0,0.32)';
+  ctx.fillRect(-HS+4, -HS+4, HS*2, HS*2);
+
+  // Crâne carré principal
+  ctx.fillStyle = flashH ? '#ff3333' : '#ece8c0';
+  ctx.fillRect(-HS, -HS, HS*2, HS*2);
+
+  // Biseau/relief : gradient sombre sur les bords
+  const headGrad=ctx.createLinearGradient(-HS,-HS, HS, HS);
+  headGrad.addColorStop(0,'rgba(255,255,230,0.18)');
+  headGrad.addColorStop(0.4,'rgba(0,0,0,0)');
+  headGrad.addColorStop(1,'rgba(0,0,0,0.28)');
+  ctx.fillStyle=headGrad; ctx.fillRect(-HS,-HS,HS*2,HS*2);
+
+  // Contour carré net
+  ctx.strokeStyle = flashH ? '#ff6666' : 'rgba(80,60,20,0.7)';
+  ctx.lineWidth=2.5;
+  ctx.strokeRect(-HS,-HS,HS*2,HS*2);
+
+  // Sutures crâniennes (lignes de fracture)
+  ctx.strokeStyle='rgba(0,0,0,0.28)'; ctx.lineWidth=1.2;
+  ctx.beginPath(); ctx.moveTo(0,-HS); ctx.lineTo(0,HS); ctx.stroke();       // verticale
+  ctx.beginPath(); ctx.moveTo(-HS,0); ctx.lineTo(HS,0); ctx.stroke();       // horizontale
+  ctx.beginPath(); ctx.moveTo(-HS*0.5,-HS); ctx.lineTo(0,-HS*0.4); ctx.lineTo(HS*0.5,-HS); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-HS,-HS*0.5); ctx.lineTo(-HS*0.4,0); ctx.lineTo(-HS,HS*0.5); ctx.stroke();
+
+  // Museau carré avancé (avant de la tête)
+  ctx.fillStyle = flashH ? '#ff4444' : '#d4cc9a';
+  ctx.fillRect(HS, -HS*0.38, HS*0.55, HS*0.76);
+  ctx.strokeStyle = flashH ? '#ff6666' : 'rgba(80,60,20,0.6)';
+  ctx.lineWidth=2;
+  ctx.strokeRect(HS, -HS*0.38, HS*0.55, HS*0.76);
+
+  // Mâchoire inférieure — plaque carrée dessous
+  ctx.fillStyle = flashH ? '#ff5555' : '#c8c090';
+  ctx.fillRect(HS*0.1, HS*0.45, HS*1.2, HS*0.55);
+  ctx.strokeStyle='rgba(60,40,10,0.5)'; ctx.lineWidth=1.5;
+  ctx.strokeRect(HS*0.1, HS*0.45, HS*1.2, HS*0.55);
+  // Dents — petits rectangles sur la mâchoire
+  ctx.fillStyle='#fffff0';
+  for(let t=0;t<5;t++){
+    const tx2 = HS*0.15 + t*(HS*1.1/5);
+    ctx.fillRect(tx2, HS*0.42, HS*0.14, HS*0.22);    // dents sup
+    ctx.fillRect(tx2, HS*0.9, HS*0.14, HS*0.24);     // dents inf
+  }
+  // Crochets venimeux — triangles plus marqués
+  ctx.fillStyle='#ffffcc';
+  ctx.beginPath(); ctx.moveTo(HS*0.7,HS*0.45); ctx.lineTo(HS*0.9,HS*0.0); ctx.lineTo(HS*1.1,HS*0.45); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(HS*1.0,HS*0.45); ctx.lineTo(HS*1.2,-HS*0.05); ctx.lineTo(HS*1.4,HS*0.45); ctx.closePath(); ctx.fill();
+
+  // Orbites oculaires — carrées aussi !
+  const eyeS=HS*0.38;
+  ctx.fillStyle='rgba(0,0,0,0.75)';
+  ctx.fillRect(-HS*0.55-eyeS/2, -HS*0.55-eyeS/2, eyeS, eyeS); // œil haut
+  ctx.fillRect(-HS*0.55-eyeS/2,  HS*0.55-eyeS/2, eyeS, eyeS); // œil bas
+  // Yeux rougeoyants — pulsent
+  const eyePulse=0.6+0.4*Math.sin(frameCount*0.15);
+  const eyeInS=eyeS*0.68;
+  ctx.shadowColor='#ff2200'; ctx.shadowBlur=10*eyePulse;
+  ctx.fillStyle=`rgba(255,${Math.round(60*eyePulse)},0,${0.85+0.15*eyePulse})`;
+  ctx.fillRect(-HS*0.55-eyeInS/2, -HS*0.55-eyeInS/2, eyeInS, eyeInS);
+  ctx.fillRect(-HS*0.55-eyeInS/2,  HS*0.55-eyeInS/2, eyeInS, eyeInS);
+  ctx.shadowBlur=0;
+  // Reflets oculaires
+  ctx.fillStyle='rgba(255,255,255,0.55)';
+  ctx.fillRect(-HS*0.62, -HS*0.63, eyeS*0.28, eyeS*0.28);
+  ctx.fillRect(-HS*0.62,  HS*0.45, eyeS*0.28, eyeS*0.28);
+
+  // Langue fourchue (animée)
+  if(snake.state==='roaming'){
+    const lt=0.8+0.2*Math.sin(frameCount*0.28);
+    ctx.strokeStyle=`rgba(220,20,20,${lt})`; ctx.lineWidth=2.5; ctx.lineCap='round';
+    const lx=HS+HS*0.55;
+    ctx.beginPath(); ctx.moveTo(lx,0); ctx.lineTo(lx+10,0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(lx+10,0); ctx.lineTo(lx+18,-6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(lx+10,0); ctx.lineTo(lx+18,6); ctx.stroke();
+  }
+
+  ctx.restore(); // tête
+
+  // ── Boules de feu ──
+  for(const fb of snake.fireballs){
+    const fbx=Math.round(sx(fb.x)), fby=Math.round(sy(fb.y));
+    const pulse=0.7+0.3*Math.sin(fb.phase);
+    ctx.save();
+    ctx.shadowColor='#ff6d00'; ctx.shadowBlur=16*pulse;
+    ctx.globalAlpha=snake.alpha;
+    // Sphère de feu — 2x plus grosse
+    const fbR = fb.r*ZOOM*0.84;
+    const grad=ctx.createRadialGradient(fbx-3,fby-3,1,fbx,fby,fbR);
+    grad.addColorStop(0,'#ffffff'); grad.addColorStop(0.2,'#ffffaa'); grad.addColorStop(0.55,'#ff8800'); grad.addColorStop(1,'rgba(180,30,0,0)');
+    ctx.fillStyle=grad;
+    ctx.beginPath(); ctx.arc(fbx,fby,fbR,0,Math.PI*2); ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.restore();
+  }
+
+  // ── HP bar boss ──
+  if(snake.state==='roaming'||snake.state==='surfacing'){
+    const bw=120, bh=10, bx2=VW/2-bw/2, by2=VH-80;
+    ctx.globalAlpha=1;
+    // Fond
+    ctx.fillStyle='rgba(0,0,0,0.8)'; ctx.fillRect(bx2-4,by2-18,bw+8,bh+24);
+    ctx.fillStyle='#222'; ctx.fillRect(bx2,by2,bw,bh);
+    // Barre HP
+    const hpProg=snake.hp/SNAKE_HP_MAX;
+    const hpC=hpProg>0.6?'#ff6600':hpProg>0.3?'#ff3300':'#cc0000';
+    ctx.fillStyle=hpC; ctx.fillRect(bx2,by2,bw*hpProg,bh);
+    // Effet brillant
+    ctx.fillStyle='rgba(255,255,255,0.2)'; ctx.fillRect(bx2,by2,bw*hpProg,bh/2);
+    // Label
+    ctx.fillStyle='#ff6600'; ctx.font='bold 10px Courier New'; ctx.textAlign='center';
+    ctx.shadowColor='#ff6600'; ctx.shadowBlur=6;
+    ctx.fillText('💀 SERPENT BOSS — '+snake.hp+'/'+SNAKE_HP_MAX, VW/2, by2-4);
+    ctx.shadowBlur=0;
+    // Points de HP
+    for(let h=0;h<SNAKE_HP_MAX;h++){
+      const dotX=bx2+h*(bw/SNAKE_HP_MAX)+4;
+      ctx.fillStyle=h<snake.hp?'#ff6600':'#333';
+      ctx.beginPath(); ctx.arc(dotX,by2+bh+8,3,0,Math.PI*2); ctx.fill();
+    }
+  }
+
+  // ── Flèche directionnelle si la tête du serpent est hors écran ──
+  if(snake.active && !snake.dead && snake.alpha > 0.3 && (snake.state==='roaming'||snake.state==='surfacing')){
+    const head=snake.segs[0];
+    const hsx=sx(head.x), hsy=sy(head.y);
+    const margin=50;
+    if(hsx < margin || hsx > VW-margin || hsy < margin || hsy > VH-margin){
+      // Calcul angle vers la tête
+      const ang2=Math.atan2(hsy - VH/2, hsx - VW/2);
+      // Point sur le bord de l'écran
+      const edgeX=Math.max(margin, Math.min(VW-margin, VW/2 + Math.cos(ang2)*180));
+      const edgeY=Math.max(margin, Math.min(VH-margin, VH/2 + Math.sin(ang2)*180));
+      ctx.save();
+      const pulse2=0.7+0.3*Math.sin(frameCount*0.2);
+      ctx.globalAlpha=0.9*pulse2;
+      ctx.translate(edgeX, edgeY);
+      ctx.rotate(ang2);
+      // Flèche triangle
+      ctx.fillStyle='#ff4400';
+      ctx.shadowColor='#ff4400'; ctx.shadowBlur=12;
+      ctx.beginPath();
+      ctx.moveTo(18, 0);
+      ctx.lineTo(-10, -10);
+      ctx.lineTo(-6, 0);
+      ctx.lineTo(-10, 10);
+      ctx.closePath();
+      ctx.fill();
+      // Texte "BOSS"
+      ctx.rotate(-ang2);
+      ctx.fillStyle='#ff6600';
+      ctx.font='bold 9px Courier New';
+      ctx.textAlign='center';
+      ctx.fillText('BOSS', 0, -14);
+      ctx.shadowBlur=0;
+      ctx.restore();
+    }
+  }
+
+  // ── Indicateur "sous terre" quand caché ──
+  if((snake.state==='hidden'||snake.state==='diving') && snake.announced && !snake.dead){
+    // Petite icone + timer sur la minimap (géré ailleurs)
+    // Flash position de surface à venir sur terrain
+    if(snake.state==='hidden' && snake.hiddenTimer<60){
+      const sx2=Math.round(sx(snake.surfaceX)), sy2=Math.round(sy(snake.surfaceY));
+      const alpha=(60-snake.hiddenTimer)/60;
+      ctx.save();
+      ctx.globalAlpha=alpha*0.7*((frameCount%12<6)?1:0.4);
+      ctx.strokeStyle='#ff6600'; ctx.lineWidth=2;
+      ctx.shadowColor='#ff6600'; ctx.shadowBlur=10;
+      ctx.beginPath(); ctx.arc(sx2,sy2,18+Math.random()*4,0,Math.PI*2); ctx.stroke();
+      ctx.shadowBlur=0;
+      // Croix de visée
+      ctx.strokeStyle='rgba(255,100,0,0.8)'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(sx2-14,sy2); ctx.lineTo(sx2+14,sy2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx2,sy2-14); ctx.lineTo(sx2,sy2+14); ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
+
+
+// ══════════════════════════════════════
 // ZOMBIE TYPES  (5 types)
 // ══════════════════════════════════════
 // speedMult = random factor applied at spawn for natural variation
@@ -655,6 +1714,12 @@ const ZTYPES = [
     shirts:['#ffeb3b','#fff176','#f9a825','#ff8f00'],
     pants:['#1565c0','#0288d1','#006064'],
     pts:30, scale:0.9, label:'⚡' },
+  // 4: Giant — 4× bigger, 10hp, very slow, massive damage
+  { id:'giant',  maxHp:10, spd:0.10, spdVar:0.02, w:56,h:80,
+    skins:['#9e9e9e','#8d8d8d','#b0b0b0'],
+    shirts:['#c62828','#ad1457','#6a1b9a','#1565c0','#2e7d32','#e65100'],
+    pants:['#1565c0','#0d47a1','#1a237e','#263238','#37474f'],
+    pts:150, scale:4, label:'👊' },
 ];
 
 // ══════════════════════════════════════
@@ -662,7 +1727,8 @@ const ZTYPES = [
 // ══════════════════════════════════════
 let player, ball, zombies, particles;
 let score, wave, totalKills, frameCount, shootCooldown;
-let killsByType = {normal:0, big:0, tank:0, fast:0};
+let killsByType = {normal:0, big:0, tank:0, fast:0, giant:0};
+let bossKills = 0;
 let gameOver, waveAnnounce, loopId;
 // Fixed timestep: logic always runs at 60fps regardless of display refresh rate
 const FIXED_DT = 1000 / 60; // 16.667ms per logic tick
@@ -677,10 +1743,12 @@ let zombieSpeedMult = 1; // persists across wave-5 purges
 // ══════════════════════════════════════
 let powerups = [];
 let powerupSpawnTimer = 0;
-// Timer for the random extra powerup that appears every ~5s (±1s variance)
 let powerupExtraTimer = 0;
-let powerupExtraInterval = 0; // randomised each time
-let powerupsUnlocked = false; // becomes true at wave 2
+let powerupExtraInterval = 0;
+let powerupsUnlocked = false;
+
+// Notification de power-up ramassé
+let puNotif = { timer: 0, maxTimer: 180, icon: '', label: '', color: '#e8ff00' };
 
 // Active effects
 const fx = {
@@ -689,12 +1757,13 @@ const fx = {
   thunder:    { active:false, timer:0, max:600, nextStrike:0 }, // 10s
   slowMo:     { active:false, timer:0, max:600 },   // 10s (was 4s)
   shotgun:    { active:false, timer:0, max:600, reloading:0, shots:3, aimX:1, aimY:0, muzzleFlash:0 }, // 10s
+  iceBall:    { active:false, timer:0, max:600 },   // 10s
 };
 // Mega Dash powerup state
 const megaDash = {
   active: false,
   timer: 0,
-  max: 600,          // 10s at 60fps
+  max: 360,          // 6s at 60fps (was 10s)
   ready: false,
   lowHpBtn: false,
   lowHpUsed: false,
@@ -709,14 +1778,18 @@ const megaDash = {
   // Laser trail: array of {x1,y1,x2,y2, life, maxLife}
   lasers: [],
   hopStartX: 0, hopStartY: 0, // start pos of current hop (for laser)
+  // Low HP freeze: game pauses 2s to let player tap mega dash
+  lowHpFreezeTimer: 0,      // frames remaining in freeze (120 = 2s)
+  lowHpFreezeTriggered: false, // has the freeze been triggered this life?
 };
 // Button zone for low-hp mega button — BIGGER
 const MEGA_BTN = { x: VW/2-90, y: VH-130, w: 180, h: 68 };
 // Ricochet: permanent, stacks up to 5
 let ricochetCount = 0; // 0 = off, 1-5 = number of bounces
+let currentTarget = null; // currently targeted zombie (for arrow display)
 let ricochetTimer = 0; // frames remaining (1800 = 30s)
 // Extra balls: stacks — positions: [right, left, above, below]
-let extraBalls = []; // array of ball objects, max 3 extra (total 4)
+let extraBalls = []; // array of ball objects, max 7 extra (total 8)
 // Orbit balls: 6 balls orbiting the player (x6balls powerup)
 let orbitBalls = []; // array of orbit ball objects
 const ORBIT_R = 38;  // orbit radius in world units
@@ -739,7 +1812,14 @@ let thunderbolts = [];
 let fireTrails = [];
 // pause state
 let isPaused = false;
+// ── Pause menu animation ──
+// pauseAnim: 0=hidden, 1=fully visible; drives per-element transitions
+let pauseAnim = 0;          // 0→1 open, 1→0 close
+let pauseAnimDir = 0;       // +1 opening, -1 closing, 0 idle
+const PAUSE_ANIM_SPD = 0.07; // frames to full open (≈14 frames)
 let invincibleMode = false;
+let autoKick = true;          // si false, tir manuel (espace / tap)
+let manualKickRequest = false; // demande de tir manuel (1 frame)
 // wave break: 2s spawn freeze when a new wave starts
 let waveBreakTimer = 0; // counts down from 120 (2s)
 // One Up system
@@ -766,24 +1846,31 @@ function startGame(){
 
 function initGame(){
   score=0; wave=1; totalKills=0; frameCount=0;
-  killsByType={normal:0,big:0,tank:0,fast:0};
+  killsByType={normal:0,big:0,tank:0,fast:0,giant:0};
+  bossKills=0;
   gameOver=false; shootCooldown=60; waveAnnounce=180;
   particles=[]; zombies=[];
   targetCount = 8; // start small
   spawnTimer = 0;
   zombieSpeedMult = 1;
   // Reset powerups
-  powerups=[]; powerupSpawnTimer=0; thunderbolts=[]; extraBalls=[]; fireTrails=[]; orbitBalls=[]; orbitBallsTimer=0;
+  powerups=[]; powerupSpawnTimer=0; thunderbolts=[]; extraBalls=[]; fireTrails=[]; iceTrails=[]; orbitBalls=[]; orbitBallsTimer=0;
   samurai.active=false; samurai.timer=0; samurai.swingAngle=0; samurai.swingDir=1;
   samurai.hitCooldown=0; samurai.ghosts=[]; samurai.ghostTimer=0;
   powerupExtraTimer=0; powerupExtraInterval=0; powerupsUnlocked=false;
-  ricochetCount=0; ricochetTimer=0; isPaused=false; waveBreakTimer=0;
+  puNotif.timer=0;
+  ricochetCount=0; ricochetTimer=0; isPaused=false; pauseAnim=0; pauseAnimDir=0; waveBreakTimer=0;
   megaDash.active=false; megaDash.timer=0; megaDash.ready=false;
   megaDash.lowHpBtn=false; megaDash.lowHpUsed=false;
   megaDash.vx=0; megaDash.vy=0; megaDash.pendingVx=0; megaDash.pendingVy=0;
   megaDash.phase='pause'; megaDash.phaseTimer=0; megaDash.lasers=[]; megaDash.hopStartX=0; megaDash.hopStartY=0;
+  megaDash.lowHpFreezeTimer=0; megaDash.lowHpFreezeTriggered=false;
   oneUpCount=0; oneUpScoreThreshold=10000; oneUpAnim=0; oneUpFX.phase=0; oneUpFX.timer=0; oneUpFX.shockR=0;
   biome=0; biomePrev=0; biomeTransition=1; snowflakes=[]; biomeObstacles=[];
+  // Reset boss
+  snake.active=false; snake.hp=SNAKE_HP_MAX; snake.dead=false; snake.deadTimer=0; snake.everSpawned=false; snake.firstBossDefeated=false;
+  snake.state='hidden'; snake.stateTimer=0; snake.fireballs=[]; snake.fireTimer=0;
+  snake.announced=false; snake.alpha=0; snake.segs=[]; snake.shakeTimer=0; snake.hiddenTimer=1;
   for(const k in fx){ fx[k].active=false; fx[k].timer=0; if(k==='thunder') fx[k].nextStrike=0; if(k==='shotgun'){fx[k].reloading=0;fx[k].shots=3;} }
 
   player = {
@@ -814,9 +1901,12 @@ function initGame(){
 // ══════════════════════════════════════
 // SPAWNING
 // ══════════════════════════════════════
+function countAliveGiants(){ return zombies.filter(z=>!z.dead&&z.id==='giant').length; }
+
 function zombieTypeForWave(){
   const r = Math.random();
-  if(wave >= 2 && r < 0.18) return 3; // fast (single fast type)
+  if(snake.firstBossDefeated && r < 0.08 && countAliveGiants() < 2) return 4; // giant — après mort du 1er boss
+  if(wave >= 2 && r < 0.18) return 3; // fast
   if(wave >= 4 && r < 0.10) return 2; // tank
   if(wave >= 2 && r < 0.26) return 1; // big
   return 0; // normal
@@ -898,6 +1988,14 @@ function spawnZombie(immediate){
     dir: initDir,
     emerging: isDigSpawn ? 180 : 0, // 180 frames (3s) slow dig-out animation
     emergeY: wy2,                   // ground level
+    // Giant jump state
+    jumpPhase: 0,       // 0=grounded, 1=charging, 2=airborne, 3=landing
+    jumpTimer: 0,
+    jumpCooldown: 0,
+    jumpStartX: 0, jumpStartY: 0,
+    jumpTargetX: 0, jumpTargetY: 0,
+    jumpDuration: 0,
+    jumpArcH: 0,
   });
   // Spawn dirt particles at dig location
   if(isDigSpawn){ spawnDirt(wx2, wy2); SFX.zombieEmerge(); }
@@ -914,24 +2012,44 @@ canvas.addEventListener('touchstart', e=>{
   const scX=VW/r.width, scY=VH/r.height;
   const tx=(t.clientX-r.left)*scX, ty=(t.clientY-r.top)*scY;
   // Pause button zone: bottom-right 48×48
-  if(!gameOver && tx>VW-48 && ty>VH-48){ isPaused=!isPaused; return; }
+  if(!gameOver && tx>VW-48 && ty>VH-48){ togglePause(); return; }
   // Invincible mode checkbox (only when paused)
   if(isPaused){ updateInvincCbY(); if(tx>=INVINC_CB.x && tx<=INVINC_CB.x+INVINC_CB.w && ty>=INVINC_CB.y && ty<=INVINC_CB.y+INVINC_CB.h){ invincibleMode=!invincibleMode; return; } }
+  // Auto kick checkbox (only when paused)
+  if(isPaused){ updateAutoKickCbY(); if(tx>=AUTOKICK_CB.x && tx<=AUTOKICK_CB.x+AUTOKICK_CB.w && ty>=AUTOKICK_CB.y && ty<=AUTOKICK_CB.y+AUTOKICK_CB.h){ autoKick=!autoKick; return; } }
+  // Play button (only when paused)
+  if(isPaused){ updatePlayBtnY(); if(tx>=PLAY_BTN.x && tx<=PLAY_BTN.x+PLAY_BTN.w && ty>=PLAY_BTN.y && ty<=PLAY_BTN.y+PLAY_BTN.h){ togglePause(); return; } }
+  // Go to Home button (only when paused)
+  if(isPaused){ updateHomeBtnY(); if(tx>=HOME_BTN.x && tx<=HOME_BTN.x+HOME_BTN.w && ty>=HOME_BTN.y && ty<=HOME_BTN.y+HOME_BTN.h){ goToHome(); return; } }
   // Mega Power button zone (low hp emergency)
   if(!gameOver && !megaDash.active && megaDash.lowHpBtn &&
      tx>=MEGA_BTN.x && tx<=MEGA_BTN.x+MEGA_BTN.w &&
      ty>=MEGA_BTN.y && ty<=MEGA_BTN.y+MEGA_BTN.h){
+    megaDash.lowHpFreezeTimer = 0; // exit freeze immediately
     startMegaDash(); return;
   }
   joystickBase={x:tx,y:ty}; joystickDelta={x:0,y:0}; joystickActive=true;
+  // Mémoriser le début du touch pour détecter un tap court
+  joystickBase._tapStartTime = Date.now();
+  joystickBase._tapMoved = false;
 },{passive:false});
 
 canvas.addEventListener('click', e=>{
   const r=canvas.getBoundingClientRect();
   const scX=VW/r.width, scY=VH/r.height;
   const tx=(e.clientX-r.left)*scX, ty=(e.clientY-r.top)*scY;
-  if(!gameOver && tx>VW-48 && ty>VH-48){ isPaused=!isPaused; return; }
+  if(!gameOver && tx>VW-48 && ty>VH-48){ togglePause(); return; }
   if(isPaused){ updateInvincCbY(); if(tx>=INVINC_CB.x && tx<=INVINC_CB.x+INVINC_CB.w && ty>=INVINC_CB.y && ty<=INVINC_CB.y+INVINC_CB.h){ invincibleMode=!invincibleMode; return; } }
+  if(isPaused){ updateAutoKickCbY(); if(tx>=AUTOKICK_CB.x && tx<=AUTOKICK_CB.x+AUTOKICK_CB.w && ty>=AUTOKICK_CB.y && ty<=AUTOKICK_CB.y+AUTOKICK_CB.h){ autoKick=!autoKick; return; } }
+  if(isPaused){ updatePlayBtnY(); if(tx>=PLAY_BTN.x && tx<=PLAY_BTN.x+PLAY_BTN.w && ty>=PLAY_BTN.y && ty<=PLAY_BTN.y+PLAY_BTN.h){ togglePause(); return; } }
+  if(isPaused){ updateHomeBtnY(); if(tx>=HOME_BTN.x && tx<=HOME_BTN.x+HOME_BTN.w && ty>=HOME_BTN.y && ty<=HOME_BTN.y+HOME_BTN.h){ goToHome(); return; } }
+  // Mega Power button (low hp emergency) — also handles click during freeze
+  if(!gameOver && !megaDash.active && megaDash.lowHpBtn &&
+     tx>=MEGA_BTN.x && tx<=MEGA_BTN.x+MEGA_BTN.w &&
+     ty>=MEGA_BTN.y && ty<=MEGA_BTN.y+MEGA_BTN.h){
+    megaDash.lowHpFreezeTimer = 0;
+    startMegaDash(); return;
+  }
 });
 
 canvas.addEventListener('touchmove', e=>{
@@ -942,19 +2060,67 @@ canvas.addEventListener('touchmove', e=>{
   const dx=(t.clientX-r.left)*scX-joystickBase.x;
   const dy=(t.clientY-r.top)*scY-joystickBase.y;
   const d=Math.sqrt(dx*dx+dy*dy), maxR=55;
+  if(d>8) joystickBase._tapMoved = true; // mouvement significatif → pas un tap
   joystickDelta.x = d>maxR?(dx/d)*maxR:dx;
   joystickDelta.y = d>maxR?(dy/d)*maxR:dy;
 },{passive:false});
 
 canvas.addEventListener('touchend', e=>{
-  e.preventDefault(); joystickActive=false; joystickDelta={x:0,y:0};
+  e.preventDefault();
+  // Tap court sans mouvement = tir manuel du ballon / extra balls
+  // Toujours actif : le tap déclenche manualKickRequest dans tous les cas
+  // (autoKick gère le tir auto du ballon principal indépendamment)
+  if(joystickBase && !joystickBase._tapMoved){
+    const elapsed = Date.now() - (joystickBase._tapStartTime||0);
+    if(elapsed < 220 && !gameOver && !isPaused) manualKickRequest = true;
+  }
+  joystickActive=false; joystickDelta={x:0,y:0};
 },{passive:false});
 
 const keys={};
 addEventListener('keydown',e=>{
   keys[e.key]=true;
-  if((e.key==='Escape'||e.key==='p')&&!gameOver) isPaused=!isPaused;
+  if((e.key==='Escape'||e.key==='p')&&!gameOver) togglePause();
   if(e.key==='m'&&!gameOver&&!megaDash.active) startMegaDash();
+  // ── Espace : tir manuel du ballon ──
+  if(e.key===' '&&!gameOver&&!isPaused){ manualKickRequest=true; e.preventDefault(); }
+  // ── Touche S : activer le boss serpent squelette (debug/test) ──
+  // ── Touche N : passer au décor suivant (+10000 score) ──
+  if(e.key==='n'&&!gameOver&&!isPaused){
+    score += 10000;
+    particles.push({x:cam.x,y:cam.y-60,vx:0,vy:-0.5,
+      life:150,maxLife:150,color:'#e8ff00',sz:0,text:'+10000 ➜ NEXT BIOME!'});
+    SFX.waveUp();
+  }
+  if(e.key==='b'&&!gameOver){
+    // Tuer tous les zombies en explosion
+    for(const z of zombies){
+      if(z.dead) continue;
+      if(z.id==='giant'){
+        const a=Math.random()*Math.PI*2;
+        damageGiant(z, Math.cos(a), Math.sin(a));
+      } else {
+        z.dead=true; z.deadAnim=38;
+        const a=Math.random()*Math.PI*2;
+        z.knockX=Math.cos(a)*8; z.knockY=Math.sin(a)*8; z.flyingCorpse=true;
+        goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.skin||'#9e9e9e');
+      }
+    }
+    // Reset + spawn boss serpent immédiatement
+    snake.active=false; snake.dead=false; snake.hp=SNAKE_HP_MAX;
+    snake.state='hidden'; snake.stateTimer=0; snake.announced=false;
+    snake.fireballs=[]; snake.alpha=0; snake.segs=[];
+    snake.hiddenTimer=1; snake.shakeTimer=0;
+    _snakePickSurfacePos();
+    for(let i=0;i<SNAKE_SEGMENTS;i++) snake.segs.push({x:snake.surfaceX,y:snake.surfaceY});
+    snake.angle=Math.random()*Math.PI*2; snake.targetAngle=snake.angle;
+    snake.active=true;
+    screenBlast(10);
+    SFX.waveUp();
+    // Message flash
+    particles.push({x:cam.x,y:cam.y-60,vx:0,vy:-0.3,
+      life:180,maxLife:180,color:'#ff6600',sz:0,text:'⚠ BOSS SERPENT !'});
+  }
 });
 addEventListener('keyup',  e=>keys[e.key]=false);
 
@@ -962,19 +2128,30 @@ addEventListener('keyup',  e=>keys[e.key]=false);
 // HELPERS
 // ══════════════════════════════════════
 function nearestVisible(){
-  // Zombie must be at least 20% inside the visible screen to be targetable
-  const marginX = VW * 0.20;
-  const marginY = VH * 0.20;
+  // ── PRIORITÉ : tête du serpent boss si actif et visible ──
+  if(snake.active && !snake.dead && (snake.state==='roaming'||snake.state==='surfacing') && snake.alpha>0.3){
+    const head=snake.segs[0];
+    const scx=sx(head.x), scy=sy(head.y);
+    if(scx>=-40 && scx<=VW+40 && scy>=-40 && scy<=VH+40){
+      currentTarget = null; // snake head has no zombie object
+      return { x:head.x, y:head.y, _isSnakeHead:true };
+    }
+  }
+  // Zombie must be visible on screen (any part visible)
   let best=null, bestD=Infinity;
   for(const z of zombies){
     if(z.dead) continue;
     if(z.emerging>0) continue;
     if(z.onFire) continue; // already burning — treated as dead, don't target
+    if(z.frozen && fx.iceBall.active) continue; // already frozen — skip to hit fresh targets
     const scx=sx(z.x), scy=sy(z.y);
-    if(scx < marginX || scx > VW-marginX || scy < marginY || scy > VH-marginY) continue;
+    const hw = (z.w||14)*ZOOM*0.5, hh = (z.h||20)*ZOOM*0.5;
+    // Accept if any part of zombie sprite is within screen bounds
+    if(scx+hw < 0 || scx-hw > VW || scy+hh < 0 || scy-hh > VH) continue;
     const dx=z.x-player.x, dy=z.y-player.y, d=Math.sqrt(dx*dx+dy*dy);
     if(d<bestD){bestD=d;best=z;}
   }
+  currentTarget = best;
   return best;
 }
 
@@ -1066,6 +2243,88 @@ function scorePopup(wx2,wy2,pts){
 }
 
 // ══════════════════════════════════════
+// GIANT DEATH EXPLOSION
+// ══════════════════════════════════════
+function giantDeathExplosion(z, dirX, dirY){
+  const cx=z.x, cy=z.y;
+  const skin=z.skin||'#9e9e9e', shirt=z.shirt||'#c62828';
+
+  // 8 gore explosions spread around the giant's body
+  for(let i=0;i<8;i++){
+    const spread = (i/8)*Math.PI*2;
+    const ox = cx + Math.cos(spread)*(12+Math.random()*18);
+    const oy = cy + (Math.sin(spread)*0.7)*(12+Math.random()*18);
+    const da = spread + (Math.random()-0.5)*0.8;
+    goreExplosion(ox, oy, Math.cos(da), Math.sin(da), i%2===0?skin:shirt);
+  }
+  // Central explosion
+  goreExplosion(cx, cy, dirX||Math.cos(Math.random()*Math.PI*2), dirY||Math.sin(Math.random()*Math.PI*2), skin);
+
+  // Extra blood puddles under the giant
+  for(let i=0;i<16;i++){
+    const a=Math.random()*Math.PI*2, r=Math.random()*40;
+    particles.push({x:cx+Math.cos(a)*r, y:cy+Math.sin(a)*r*0.5,
+      vx:0, vy:0, life:900, maxLife:900,
+      color:Math.random()<0.7?'#7b0000':'#c62828', sz:6+Math.random()*10,
+      type:'puddle', gravity:0});
+  }
+
+  // ── FALLING HEAD ──
+  // Head starts at top of giant (approx 80 units up = h)
+  const headX = cx + (z.dir||1)*4;
+  const headY = cy - z.h*0.9;
+  const headSkin = skin;
+  // Initial velocity: small horizontal + upward burst, then gravity
+  const hVx = (dirX||0)*2 + (Math.random()-0.5)*4;
+  const hVy = -5 - Math.random()*3; // shoots up
+  const hRot = (Math.random()-0.5)*0.3; // spin
+
+  // We store the head as a special particle with type 'giantHead'
+  particles.push({
+    type: 'giantHead',
+    x: headX, y: headY,
+    vx: hVx, vy: hVy,
+    rot: Math.random()*Math.PI*2,
+    rotV: hRot,
+    life: 200, maxLife: 200,
+    bounces: 0, maxBounces: 2,
+    groundY: cy + 4, // land on giant's feet level
+    skin: headSkin,
+    shirt: shirt,
+    dir: z.dir||1,
+    exploded: false,
+    sz: 0, // ignored by normal particle renderer
+    color: headSkin,
+    gravity: 0, // handled manually
+  });
+
+  // Giant SFX
+  SFX.giantLand();
+  setTimeout(()=>SFX.explode(), 120);
+  screenBlast(28);
+}
+
+// Damage a giant by 1 HP from any instakill source; kill normally when hp reaches 0
+// Returns true if the giant actually died
+function damageGiant(z, dirX, dirY){
+  if(z.dead) return false;
+  z.hp = Math.max(0, z.hp - 1);
+  z.hitFlash = 12;
+  blood(z.x, z.y, 14);
+  SFX.bigHit();
+  if(z.hp <= 0){
+    z.dead = true; z.deadAnim = 60;
+    z.flyingCorpse = false; // giant doesn't fly — it explodes in place
+    score += z.pts; totalKills++;
+    if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+    scorePopup(z.x, z.y, z.pts);
+    giantDeathExplosion(z, dirX, dirY);
+    return true;
+  }
+  return false;
+}
+
+// ══════════════════════════════════════
 // SCREEN BLAST — full-screen vibration effect
 // ══════════════════════════════════════
 function screenBlast(intensity){
@@ -1139,13 +2398,18 @@ function updateOneUpFX(){
       // Kill all zombies on screen
       for(const z of zombies){
         if(z.dead) continue;
-        z.dead=true; z.deadAnim=38;
-        score+=z.pts; totalKills++;
-        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
-        const a=Math.random()*Math.PI*2;
-        z.knockX=Math.cos(a)*14; z.knockY=Math.sin(a)*14; z.flyingCorpse=true;
-        goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.skin||'#9e9e9e');
-        scorePopup(z.x,z.y,z.pts);
+        if(z.id==='giant'){
+          const a=Math.random()*Math.PI*2;
+          damageGiant(z, Math.cos(a), Math.sin(a));
+        } else {
+          z.dead=true; z.deadAnim=38;
+          score+=z.pts; totalKills++;
+          if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+          const a=Math.random()*Math.PI*2;
+          z.knockX=Math.cos(a)*14; z.knockY=Math.sin(a)*14; z.flyingCorpse=true;
+          goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.skin||'#9e9e9e');
+          scorePopup(z.x,z.y,z.pts);
+        }
       }
       // Reset zombie speed
       zombieSpeedMult=1;
@@ -1209,11 +2473,16 @@ const PUDEF = [
   { id:'thunder',    icon:'⚡', label:'THUNDER',    color:'#ffeb3b', glow:'#ffe57f' },
   { id:'slowmo',     icon:'🐌', label:'SLOW MO',    color:'#9c27b0', glow:'#e040fb' },
   { id:'doubleball', icon:'⚽', label:'+1 BALL',    color:'#e8ff00', glow:'#ffffff' },
+  { id:'doubleball', icon:'⚽', label:'+1 BALL',    color:'#e8ff00', glow:'#ffffff' },
+  { id:'doubleball', icon:'⚽', label:'+1 BALL',    color:'#e8ff00', glow:'#ffffff' },
+  { id:'doubleball', icon:'⚽', label:'+1 BALL',    color:'#e8ff00', glow:'#ffffff' },
+  { id:'doubleball', icon:'⚽', label:'+1 BALL',    color:'#e8ff00', glow:'#ffffff' },
   { id:'shotgun',    icon:'GUN', label:'SHOTGUN',   color:'#ff5722', glow:'#ff8a65' },
   { id:'resetspeed', icon:'⏹️',  label:'SPEED×0',  color:'#00bcd4', glow:'#00e5ff' },
   { id:'megadash',   icon:'💨', label:'MEGA',      color:'#00cfff', glow:'#00eeff' },
   { id:'x6balls',    icon:'⚽', label:'×6 BALLS',  color:'#e8ff00', glow:'#ffffff' },
   { id:'samurai',    icon:'⚔️', label:'SAMURAI',    color:'#c0c0c0', glow:'#ffffff' },
+  { id:'iceball',    icon:'🧊', label:'ICE BALL',   color:'#00cfff', glow:'#aaeeff' },
 ];
 
 function spawnPowerup(){
@@ -1250,15 +2519,24 @@ function makeBallObj(offsetX, offsetY){
   };
 }
 
-// Extra ball foot positions in order: left, above, below
+// Extra ball foot positions in order (7 max extra = 8 total)
 const EXTRA_BALL_OFFSETS = [
-  { x:-8,  y:0  },   // ball 2: left side
+  { x:-8,  y:0   },  // ball 2: left side
   { x:0,   y:-12 },  // ball 3: above
   { x:0,   y:12  },  // ball 4: below
+  { x:10,  y:-8  },  // ball 5: right-top
+  { x:10,  y:8   },  // ball 6: right-bottom
+  { x:-12, y:-10 },  // ball 7: left-top
+  { x:-12, y:10  },  // ball 8: left-bottom
 ];
 
 function activatePowerup(def){
   SFX.powerupPickup();
+  // Notification HUD
+  puNotif.timer = puNotif.maxTimer;
+  puNotif.icon  = def.icon;
+  puNotif.label = def.label;
+  puNotif.color = def.glow || def.color || '#e8ff00';
   switch(def.id){
     case 'fireball':
       fx.fireBall.active=true; fx.fireBall.timer=fx.fireBall.max; break;
@@ -1275,7 +2553,7 @@ function activatePowerup(def){
     case 'slowmo':
       fx.slowMo.active=true; fx.slowMo.timer=fx.slowMo.max; break;
     case 'doubleball':
-      if(extraBalls.length < 3){
+      if(extraBalls.length < 7){
         const off = EXTRA_BALL_OFFSETS[extraBalls.length];
         extraBalls.push(makeBallObj(off.x, off.y));
       }
@@ -1304,6 +2582,8 @@ function activatePowerup(def){
     case 'samurai':
       activateSamurai();
       break;
+    case 'iceball':
+      fx.iceBall.active=true; fx.iceBall.timer=fx.iceBall.max; break;
   }
   cam.shake=4; cam.shakeDecay=0.7;
 }
@@ -1316,14 +2596,24 @@ function triggerBomb(){
     if(z.dead) continue;
     const scx=sx(z.x), scy=sy(z.y);
     if(scx>-30 && scx<VW+30 && scy>-30 && scy<VH+30){
-      z.dead=true; z.deadAnim=38;
-      score+=z.pts; totalKills++;
-      if(killsByType[z.id]!==undefined) killsByType[z.id]++;
-      const a=Math.random()*Math.PI*2;
-      z.knockX=Math.cos(a)*6; z.knockY=Math.sin(a)*6;
-      z.flyingCorpse=true;
-      goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.body);
-      scorePopup(z.x,z.y,z.pts);
+      if(z.id==='giant'){
+        const a=Math.random()*Math.PI*2;
+        // Bomb = instant kill for giant
+        z.hp=0; z.dead=true; z.deadAnim=60; z.flyingCorpse=false;
+        score+=z.pts; totalKills++;
+        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+        scorePopup(z.x,z.y,z.pts);
+        giantDeathExplosion(z, Math.cos(a), Math.sin(a));
+      } else {
+        z.dead=true; z.deadAnim=38;
+        score+=z.pts; totalKills++;
+        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+        const a=Math.random()*Math.PI*2;
+        z.knockX=Math.cos(a)*6; z.knockY=Math.sin(a)*6;
+        z.flyingCorpse=true;
+        goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.body);
+        scorePopup(z.x,z.y,z.pts);
+      }
       killed++;
     }
   }
@@ -1417,26 +2707,44 @@ function updateOrbitBalls(){
 
       if(!ob.returning){
         let didBounce=false;
+        // ── Collision tête du serpent ──
+        if(checkBallSnakeHit(ob.x,ob.y,ob.vx,ob.vy)){
+          const ang2=Math.atan2(player.y-ob.y,player.x-ob.x);
+          ob.vx=Math.cos(ang2)*BALL_SPD; ob.vy=Math.sin(ang2)*BALL_SPD;
+          ob.returning=true; ob.z=0; ob.zv=2;
+        }
         for(const z of zombies){
           if(z.dead||z.emerging>0) continue;
           if(ob.hitZombies&&ob.hitZombies.includes(z)) continue;
           const dx=ob.x-z.x, dy=ob.y-z.y, d=Math.sqrt(dx*dx+dy*dy);
           if(d<z.w/2+ob.ballR){
             if(ob.hitZombies) ob.hitZombies.push(z);
-            if(fx.fireBall.active){
+            if(fx.iceBall.active){
+              if(!z.frozen){ freezeZombie(z); } sfxIceHit();
+            } else if(fx.fireBall.active){
               igniteZombie(z); SFX.hit();
             } else {
               z.hp--; z.hitFlash=10; blood(z.x,z.y,12);
               const nd=d||1; z.knockX=(dx/nd)*5; z.knockY=(dy/nd)*5;
               SFX.hit();
               if(z.hp<=0){
-                z.dead=true; z.deadAnim=38; score+=z.pts; totalKills++;
-                if(killsByType[z.id]!==undefined) killsByType[z.id]++;
-                const bdx=ob.vx/(Math.sqrt(ob.vx*ob.vx+ob.vy*ob.vy)||1);
-                const bdy=ob.vy/(Math.sqrt(ob.vx*ob.vx+ob.vy*ob.vy)||1);
-                z.knockX=bdx*7; z.knockY=bdy*7; z.flyingCorpse=true;
-                goreExplosion(z.x,z.y,bdx,bdy,z.body);
-                scorePopup(z.x,z.y,z.pts); SFX.explode();
+                if(z.id==='giant'){
+                  const bdx=ob.vx/(Math.sqrt(ob.vx*ob.vx+ob.vy*ob.vy)||1);
+                  const bdy=ob.vy/(Math.sqrt(ob.vx*ob.vx+ob.vy*ob.vy)||1);
+                  z.hp=0; z.dead=true; z.deadAnim=60; z.flyingCorpse=false;
+                  score+=z.pts; totalKills++;
+                  if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+                  scorePopup(z.x,z.y,z.pts);
+                  giantDeathExplosion(z, bdx, bdy);
+                } else {
+                  z.dead=true; z.deadAnim=38; score+=z.pts; totalKills++;
+                  if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+                  const bdx=ob.vx/(Math.sqrt(ob.vx*ob.vx+ob.vy*ob.vy)||1);
+                  const bdy=ob.vy/(Math.sqrt(ob.vx*ob.vx+ob.vy*ob.vy)||1);
+                  z.knockX=bdx*7; z.knockY=bdy*7; z.flyingCorpse=true;
+                  goreExplosion(z.x,z.y,bdx,bdy,z.body);
+                  scorePopup(z.x,z.y,z.pts); SFX.explode();
+                }
               }
             }
             // Ricochet — affects all orbit balls if ricochetCount>0
@@ -1602,6 +2910,18 @@ function updateSamurai(){
   if(samurai.hitCooldown>0) samurai.hitCooldown--;
 
   // Kill zombies touched by sword tip/arc — sweep the full blade
+  // ── Samurai touche la tête du serpent ──
+  if(snake.active&&!snake.dead&&(snake.state==='roaming'||snake.state==='surfacing')&&snake.alpha>0.3&&samurai.hitCooldown===0){
+    for(let t=0.4;t<=1.0;t+=0.2){
+      const bxs=player.x+Math.cos(swordAng)*BLADE_LEN*t;
+      const bys=player.y+Math.sin(swordAng)*BLADE_LEN*t;
+      if(Math.hypot(bxs-snake.segs[0].x, bys-snake.segs[0].y) < SNAKE_HEAD_R+14){
+        hitSnakeBoss(Math.cos(swordAng),Math.sin(swordAng));
+        samurai.hitCooldown=6;
+        break;
+      }
+    }
+  }
   for(const z of zombies){
     if(z.dead) continue;
     // Check along blade (3 test points)
@@ -1609,17 +2929,24 @@ function updateSamurai(){
     for(let t=0.4;t<=1.0;t+=0.3){
       const bx=player.x+Math.cos(swordAng)*BLADE_LEN*t;
       const by=player.y+Math.sin(swordAng)*BLADE_LEN*t;
-      if(Math.hypot(bx-z.x, by-z.y) < z.w/2+10){ hit=true; break; }
+      const orbHitR = z.id==='giant' ? z.w/2+10 : z.w/2+10;
+      if(Math.hypot(bx-z.x, by-z.y) < orbHitR){ hit=true; break; }
     }
     if(hit && samurai.hitCooldown===0){
-      z.hp=0; z.dead=true; z.deadAnim=38;
-      score+=z.pts; totalKills++;
-      if(killsByType[z.id]!==undefined) killsByType[z.id]++;
-      const ka=Math.atan2(z.y-player.y, z.x-player.x);
-      z.knockX=Math.cos(ka)*9; z.knockY=Math.sin(ka)*9; z.flyingCorpse=true;
-      goreExplosion(z.x,z.y,Math.cos(ka),Math.sin(ka),z.skin||'#9e9e9e');
-      scorePopup(z.x,z.y,z.pts);
-      sfxSamuraiKill(); screenBlast(4);
+      if(z.id==='giant'){
+        const ka=Math.atan2(z.y-player.y, z.x-player.x);
+        damageGiant(z, Math.cos(ka), Math.sin(ka));
+        sfxSamuraiKill(); screenBlast(4);
+      } else {
+        z.hp=0; z.dead=true; z.deadAnim=38;
+        score+=z.pts; totalKills++;
+        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+        const ka=Math.atan2(z.y-player.y, z.x-player.x);
+        z.knockX=Math.cos(ka)*9; z.knockY=Math.sin(ka)*9; z.flyingCorpse=true;
+        goreExplosion(z.x,z.y,Math.cos(ka),Math.sin(ka),z.skin||'#9e9e9e');
+        scorePopup(z.x,z.y,z.pts);
+        sfxSamuraiKill(); screenBlast(4);
+      }
       samurai.hitCooldown=6; // brief cooldown to avoid multi-hit same frame
       // Slash particles along blade
       for(let i=0;i<8;i++){
@@ -1963,14 +3290,25 @@ function updateMegaDash(){
     for(const z of zombies){
       if(z.dead) continue;
       const zdx=z.x-player.x, zdy=z.y-player.y;
-      if(Math.sqrt(zdx*zdx+zdy*zdy)<z.w/2+player.w+10){
-        z.hp=0; z.dead=true; z.deadAnim=38;
-        score+=z.pts; totalKills++;
-        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
-        const ka=Math.atan2(zdy,zdx);
-        z.knockX=Math.cos(ka)*12; z.knockY=Math.sin(ka)*12; z.flyingCorpse=true;
-        goreExplosion(z.x,z.y,Math.cos(ka),Math.sin(ka),z.skin||'#9e9e9e');
-        scorePopup(z.x,z.y,z.pts);
+      const megaHitR = z.id==='giant' ? z.w/2+player.w+10 : z.w/2+player.w+10;
+      if(Math.sqrt(zdx*zdx+zdy*zdy)<megaHitR){
+        if(z.id==='giant'){
+          const ka=Math.atan2(zdy,zdx);
+          // Mega dash = instant kill for giant
+          z.hp=0; z.dead=true; z.deadAnim=60; z.flyingCorpse=false;
+          score+=z.pts; totalKills++;
+          if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+          scorePopup(z.x,z.y,z.pts);
+          giantDeathExplosion(z, Math.cos(ka), Math.sin(ka));
+        } else {
+          z.hp=0; z.dead=true; z.deadAnim=38;
+          score+=z.pts; totalKills++;
+          if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+          const ka=Math.atan2(zdy,zdx);
+          z.knockX=Math.cos(ka)*12; z.knockY=Math.sin(ka)*12; z.flyingCorpse=true;
+          goreExplosion(z.x,z.y,Math.cos(ka),Math.sin(ka),z.skin||'#9e9e9e');
+          scorePopup(z.x,z.y,z.pts);
+        }
       }
     }
 
@@ -2128,49 +3466,55 @@ function drawMegaDashTrail(){
 }
 
 function drawMegaDashButton(){
-  const show = !megaDash.active && !megaDash.lowHpUsed && player.hp<=20 && player.hp>0;
+  const show = !megaDash.active && !megaDash.lowHpUsed && (player.hp<=20 || megaDash.lowHpFreezeTimer>0) && player.hp>0;
   megaDash.lowHpBtn = show;
   if(!show) return;
 
   const {x,y,w,h} = MEGA_BTN;
   const t = frameCount;
   const pulse = 0.82+0.18*Math.sin(t*0.15);
-  const glowR  = 18+10*Math.abs(Math.sin(t*0.1));
-
-  function rr(cx,cy,cw,ch,cr){
-    ctx.beginPath();
-    ctx.moveTo(cx+cr,cy);
-    ctx.lineTo(cx+cw-cr,cy); ctx.arcTo(cx+cw,cy,cx+cw,cy+cr,cr);
-    ctx.lineTo(cx+cw,cy+ch-cr); ctx.arcTo(cx+cw,cy+ch,cx+cw-cr,cy+ch,cr);
-    ctx.lineTo(cx+cr,cy+ch); ctx.arcTo(cx,cy+ch,cx,cy+ch-cr,cr);
-    ctx.lineTo(cx,cy+cr); ctx.arcTo(cx,cy,cx+cr,cy,cr);
-    ctx.closePath();
-  }
+  const skew = 10;
 
   ctx.save();
 
-  // ── Strong outer glow halo ──
-  ctx.shadowColor='#00eeff'; ctx.shadowBlur=glowR*2;
-  ctx.globalAlpha=0.4*pulse;
+  // ── Outer glow halo (parallélogramme) ──
+  ctx.shadowColor='#00eeff'; ctx.shadowBlur=28*pulse;
+  ctx.globalAlpha=0.35*pulse;
   ctx.fillStyle='#00eeff';
-  rr(x-6,y-6,w+12,h+12,14); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x+skew-6, y-6);
+  ctx.lineTo(x+w+6, y-6);
+  ctx.lineTo(x+w-skew+6, y+h+6);
+  ctx.lineTo(x-6, y+h+6);
+  ctx.closePath();
+  ctx.fill();
 
-  // ── Button background ──
-  ctx.globalAlpha=0.96;
-  ctx.shadowBlur=glowR;
+  // ── Button background bleu foncé ──
+  ctx.globalAlpha=0.97;
+  ctx.shadowBlur=18*pulse;
+  ctx.shadowColor='#00eeff';
   ctx.fillStyle='#001a2e';
-  rr(x,y,w,h,12); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x+skew, y);
+  ctx.lineTo(x+w, y);
+  ctx.lineTo(x+w-skew, y+h);
+  ctx.lineTo(x, y+h);
+  ctx.closePath();
+  ctx.fill();
 
-  // ── Pulsing border (double border for emphasis) ──
+  // ── Bordure cyan pulsante ──
   ctx.globalAlpha=pulse;
-  ctx.strokeStyle='#00eeff'; ctx.lineWidth=3.5;
-  ctx.shadowColor='#00eeff'; ctx.shadowBlur=glowR;
-  rr(x,y,w,h,12); ctx.stroke();
-  ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.lineWidth=1;
-  ctx.shadowBlur=0;
-  rr(x+4,y+4,w-8,h-8,9); ctx.stroke();
+  ctx.strokeStyle='#00eeff'; ctx.lineWidth=3;
+  ctx.shadowColor='#00eeff'; ctx.shadowBlur=14*pulse;
+  ctx.beginPath();
+  ctx.moveTo(x+skew, y);
+  ctx.lineTo(x+w, y);
+  ctx.lineTo(x+w-skew, y+h);
+  ctx.lineTo(x, y+h);
+  ctx.closePath();
+  ctx.stroke();
 
-  // ── Main label — BOLD, twice bigger ──
+  // ── Main label ──
   ctx.globalAlpha=1;
   ctx.shadowColor='#00eeff'; ctx.shadowBlur=20;
   ctx.fillStyle='#00eeff';
@@ -2185,23 +3529,20 @@ function drawMegaDashButton(){
   ctx.fillText('TAP TO ACTIVATE', x+w/2, y+h/2+17);
 
   // ── Animated bouncing arrow above button ──
-  const arrowBounce = 6*Math.abs(Math.sin(t*0.18)); // bounces up/down
+  const arrowBounce = 6*Math.abs(Math.sin(t*0.18));
   const arrowY = y - 16 - arrowBounce;
   const arrowCX = x+w/2;
 
   ctx.shadowColor='#00eeff'; ctx.shadowBlur=22;
   ctx.globalAlpha=0.9+0.1*Math.sin(t*0.2);
-  // Arrow shaft
   ctx.fillStyle='#00eeff';
   ctx.fillRect(arrowCX-3, arrowY-2, 6, 14);
-  // Arrow head (pointing down toward button)
   ctx.beginPath();
   ctx.moveTo(arrowCX-12, arrowY+10);
   ctx.lineTo(arrowCX+12, arrowY+10);
   ctx.lineTo(arrowCX, arrowY+24);
   ctx.closePath();
   ctx.fill();
-  // White core highlight on arrow
   ctx.fillStyle='#ffffff';
   ctx.globalAlpha=0.6;
   ctx.fillRect(arrowCX-1, arrowY-2, 2, 12);
@@ -2209,7 +3550,354 @@ function drawMegaDashButton(){
   ctx.restore();
 }
 
-// ── FIRE ZOMBIE: set a zombie on fire ──
+// ── ICE BALL SFX ──
+function sfxIceHit(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    // Glassy high-pitched crack
+    const o=ac.createOscillator(), g=ac.createGain(), f=ac.createBiquadFilter();
+    o.type='sine'; o.frequency.setValueAtTime(1800,t0); o.frequency.exponentialRampToValueAtTime(400,t0+0.12);
+    f.type='highpass'; f.frequency.value=800;
+    g.gain.setValueAtTime(0.35,t0); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.15);
+    o.connect(f); f.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+0.16);
+    noise(0.06,0.15,2200);
+  }catch(e){}
+}
+function sfxIceFreeze(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    // Cold crystallizing sound — descending shimmer
+    [0,0.06,0.12,0.18].forEach((dt,i)=>{
+      const freqs=[900,700,500,350];
+      const o=ac.createOscillator(), g=ac.createGain();
+      o.type='sine'; o.frequency.value=freqs[i];
+      g.gain.setValueAtTime(0.2,t0+dt); g.gain.exponentialRampToValueAtTime(0.0001,t0+dt+0.14);
+      o.connect(g); g.connect(ac.destination); o.start(t0+dt); o.stop(t0+dt+0.16);
+    });
+    noise(0.12,0.08,1800);
+  }catch(e){}
+}
+function sfxIceExplode(){
+  try{
+    const ac=getAC(), t0=ac.currentTime;
+    // Sharp shattering burst — high freq crackle + low boom
+    noise(0.22,0.7,2800); noise(0.18,0.5,800);
+    const o=ac.createOscillator(), g=ac.createGain();
+    o.type='sawtooth'; o.frequency.setValueAtTime(300,t0); o.frequency.exponentialRampToValueAtTime(40,t0+0.25);
+    g.gain.setValueAtTime(0.55,t0); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.28);
+    const f=ac.createBiquadFilter(); f.type='lowpass'; f.frequency.value=600;
+    o.connect(f); f.connect(g); g.connect(ac.destination); o.start(); o.stop(t0+0.3);
+  }catch(e){}
+}
+
+// ── ICE BALL: freeze a zombie ──
+// ice trails on ground left by ice ball (like fireTrails but icy)
+let iceTrails = [];
+
+function freezeZombie(z){
+  if(z.dead||z.frozen||z.onFire) return;
+  z.frozen=true;
+  z.frozenTimer=120; // 2 seconds at 60fps
+  z.frozenVx=0; z.frozenVy=0;
+  z.vx=0; z.vy=0; z.knockX=0; z.knockY=0;
+  // Ice crystal particles around zombie
+  for(let i=0;i<10;i++){
+    const a=(i/10)*Math.PI*2;
+    particles.push({x:z.x+Math.cos(a)*(z.w*0.6),y:z.y+Math.sin(a)*(z.h*0.5),
+      vx:Math.cos(a)*0.5, vy:Math.sin(a)*0.5,
+      life:80,maxLife:80,color:i%2===0?'#aaeeff':'#ffffff',
+      sz:3+Math.random()*3,type:'star'});
+  }
+  sfxIceFreeze();
+}
+
+// Called when frozen timer runs out — big icy explosion
+function iceExplode(z){
+  z.frozen=false; z.frozenTimer=0;
+  if(z.id==='giant'){
+    const a=Math.random()*Math.PI*2;
+    damageGiant(z, Math.cos(a), Math.sin(a));
+    sfxIceExplode(); screenBlast(8);
+    return;
+  }
+  z.hp=0; z.dead=true; z.deadAnim=38;
+  score+=z.pts; totalKills++;
+  if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+  const burstA=Math.random()*Math.PI*2;
+  z.knockX=Math.cos(burstA)*8; z.knockY=Math.sin(burstA)*8; z.flyingCorpse=true;
+  sfxIceExplode(); screenBlast(8);
+  scorePopup(z.x,z.y,z.pts*2); // double points for ice kill
+  score+=z.pts; // bonus score
+
+  // Large shatter radius — kill/freeze nearby zombies too
+  const BLAST_R = 80;
+  for(const z2 of zombies){
+    if(z2===z||z2.dead) continue;
+    const dist2=Math.hypot(z2.x-z.x,z2.y-z.y);
+    if(dist2<BLAST_R){
+      // Chain freeze (if not already frozen) or instant kill if very close
+      if(dist2<30){ iceKillZombie(z2,z.x,z.y); }
+      else if(!z2.frozen){ freezeZombie(z2); }
+    }
+  }
+
+  // Ice gore explosion: frozen chunks (blue-white) + lots of blood
+  iceGoreExplosion(z.x,z.y,Math.cos(burstA),Math.sin(burstA),z.skin||'#9e9e9e',BLAST_R);
+}
+
+function iceKillZombie(z,ox,oy){
+  if(z.dead) return;
+  if(z.id==='giant'){
+    const ka=Math.atan2(z.y-oy,z.x-ox);
+    damageGiant(z, Math.cos(ka), Math.sin(ka));
+    return;
+  }
+  z.hp=0; z.dead=true; z.deadAnim=38;
+  score+=z.pts; totalKills++;
+  if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+  const ka=Math.atan2(z.y-oy,z.x-ox);
+  z.knockX=Math.cos(ka)*10; z.knockY=Math.sin(ka)*10; z.flyingCorpse=true;
+  scorePopup(z.x,z.y,z.pts);
+  iceGoreExplosion(z.x,z.y,Math.cos(ka),Math.sin(ka),z.skin||'#9e9e9e',0);
+}
+
+function iceGoreExplosion(wx2,wy2,dirX,dirY,zColor,blastR){
+  // Frozen chunks: icy blue-white + skin colored
+  const iceColors=['#aaeeff','#ddf6ff','#88ccee','#ffffff',zColor||'#9e9e9e',C.blood,'#8b0000'];
+  // More chunks than normal + larger radius
+  const numChunks = blastR>0 ? 28 : 14;
+  for(let i=0;i<numChunks;i++){
+    const spread=(Math.random()-0.5)*(blastR>0?Math.PI*2:2.5);
+    const baseAngle=blastR>0?Math.random()*Math.PI*2:Math.atan2(dirY,dirX);
+    const a=baseAngle+spread;
+    const spd=(3+Math.random()*10)*(blastR>0?0.8:0.5);
+    const col=iceColors[Math.floor(Math.random()*iceColors.length)];
+    particles.push({x:wx2,y:wy2,
+      vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-1,
+      life:720, maxLife:720,
+      color:col, sz:3+Math.random()*6,
+      type:'iceChunk', gravity:0.16,
+      bounceCount:0, landed:false,
+      rot:Math.random()*Math.PI*2, rotV:(Math.random()-0.5)*0.5,
+      groundY:wy2+10+Math.random()*20,
+      isIce: Math.random()<0.6}); // flag to draw as crystal
+  }
+
+  // Lots of blood splatter (more than normal)
+  const numBlood = blastR>0 ? 50 : 25;
+  for(let i=0;i<numBlood;i++){
+    const a=Math.random()*Math.PI*2+(blastR>0?0:Math.atan2(dirY,dirX)-(Math.random()-0.5)*2);
+    const spd=(2+Math.random()*8)*(blastR>0?0.9:0.5);
+    particles.push({x:wx2,y:wy2,
+      vx:Math.cos(a)*spd, vy:Math.sin(a)*spd,
+      life:40+Math.random()*30, maxLife:70,
+      color:Math.random()<0.7?C.blood:'#8b0000',
+      sz:2+Math.random()*4, type:'blood', gravity:0.08});
+  }
+
+  // Blood puddles — lots, spread wide
+  const numPuddles = blastR>0 ? 20 : 10;
+  for(let i=0;i<numPuddles;i++){
+    const a=Math.random()*Math.PI*2;
+    const spd=(0.5+Math.random()*3)*(blastR>0?1.2:0.5);
+    const spread2=blastR>0?(Math.random()-0.5)*blastR*0.8:0;
+    particles.push({x:wx2+(blastR>0?Math.cos(a)*spread2:0),y:wy2+(blastR>0?Math.sin(a)*spread2:0),
+      vx:Math.cos(a)*spd, vy:Math.sin(a)*spd,
+      life:720, maxLife:720,
+      color:Math.random()<0.5?'#7b0000':'#9b0000',
+      sz:5+Math.random()*9, type:'puddle', gravity:0});
+  }
+
+  // Ice shard ring flash (small cyan sparkles)
+  const numSparks = blastR>0 ? 30 : 12;
+  for(let i=0;i<numSparks;i++){
+    const a=(i/numSparks)*Math.PI*2+Math.random()*0.5;
+    const spd=3+Math.random()*5;
+    particles.push({x:wx2,y:wy2,
+      vx:Math.cos(a)*spd, vy:Math.sin(a)*spd,
+      life:22+Math.random()*18,maxLife:40,
+      color:i%3===0?'#ffffff':'#aaeeff',
+      sz:2+Math.random()*3, type:'star'});
+  }
+
+  // Shockwave ring
+  if(blastR>0){
+    for(let i=0;i<20;i++){
+      const a=(i/20)*Math.PI*2;
+      particles.push({x:wx2+Math.cos(a)*5,y:wy2+Math.sin(a)*5,
+        vx:Math.cos(a)*(4+Math.random()*3), vy:Math.sin(a)*(4+Math.random()*3),
+        life:20,maxLife:20,color:'#aaeeff',sz:4+Math.random()*4,type:'star'});
+    }
+  }
+}
+
+// ── ICE BALL: make an ice trail segment (like fire trail but icy) ──
+function makeIceBallTrail(b){
+  const seg={x:b.x,y:b.y,life:80,maxLife:80,dead:false,pixels:[]};
+  const nPx=3+Math.floor(Math.random()*3);
+  for(let i=0;i<nPx;i++){
+    seg.pixels.push({
+      type:'block',
+      ox:(Math.random()-0.5)*8,
+      oy:-(Math.random()*10),
+      sz:4+Math.floor(Math.random()*5),
+      col:Math.random()<0.5?'#aaeeff':Math.random()<0.6?'#ddf6ff':'#88ccee',
+      birthLife:80,
+    });
+  }
+  const nSp=2+Math.floor(Math.random()*2);
+  for(let i=0;i<nSp;i++){
+    seg.pixels.push({
+      type:'spark',
+      ox:(Math.random()-0.5)*12,
+      oy:-(6+Math.random()*12),
+      vox:(Math.random()-0.5)*0.18,
+      voy:-(0.15+Math.random()*0.25),
+      sz:2+Math.floor(Math.random()*2),
+      col:Math.random()<0.6?'#ffffff':'#aaeeff',
+      birthLife:80,
+    });
+  }
+  iceTrails.push(seg);
+}
+
+// ── DRAW ICE BALL TRAIL ──
+function drawIceBallTrail(){
+  for(const ft of iceTrails){
+    const ratio=ft.life/ft.maxLife;
+    const scx=Math.round(sx(ft.x)), scy=Math.round(sy(ft.y));
+    if(scx<-60||scx>VW+60||scy<-60||scy>VH+60) continue;
+    ctx.save();
+    for(const p of ft.pixels){
+      const age=1-(ft.life/p.birthLife);
+      const alpha=ratio*(p.type==='spark'?0.8:0.65);
+      if(alpha<=0) continue;
+      const shrink=p.type==='block'?(0.3+ratio*0.7):1;
+      const sz=Math.round(p.sz*shrink*ZOOM*0.42);
+      if(sz<1) continue;
+      ctx.globalAlpha=alpha;
+      ctx.fillStyle=p.col;
+      ctx.shadowColor='#aaeeff'; ctx.shadowBlur=6;
+      const px2=Math.round(scx+p.ox*ZOOM*0.42);
+      const py2=Math.round(scy+p.oy*ZOOM*0.42);
+      ctx.fillRect(px2-Math.ceil(sz/2), py2-Math.ceil(sz/2), sz, sz);
+    }
+    ctx.restore();
+  }
+}
+
+// ── DRAW FROZEN ZOMBIE ICE EFFECT ──
+function drawFrozenZombie(z){
+  const x=Math.round(sx(z.x)), y=Math.round(sy(z.y));
+  if(x<-60||x>VW+60||y<-80||y>VH+80) return;
+  const hw=Math.round((z.w/2)*ZOOM*0.42+2), hh=Math.round((z.h/2)*ZOOM*0.42+2);
+  const w2=hw*2+4, h2=hh*2+6;
+  const prog=z.frozenTimer/120; // 1→0 as time passes
+
+  // Ice block overlay — semi-transparent blue crystal
+  ctx.save();
+  ctx.globalAlpha=0.55+prog*0.3;
+  // Outer ice shell
+  const iceGrad=ctx.createLinearGradient(x-hw-2,y-hh-3,x+hw+2,y+hh+3);
+  iceGrad.addColorStop(0,'rgba(170,238,255,0.85)');
+  iceGrad.addColorStop(0.4,'rgba(200,248,255,0.5)');
+  iceGrad.addColorStop(1,'rgba(100,200,240,0.75)');
+  ctx.fillStyle=iceGrad;
+  ctx.fillRect(x-hw-2, y-hh-3, w2, h2);
+  // Crystal glint lines
+  ctx.strokeStyle='rgba(255,255,255,0.7)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(x-hw+2,y-hh); ctx.lineTo(x-hw/2,y+hh-4); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x+hw-4,y-hh+2); ctx.lineTo(x+hw/2-2,y+hh-6); ctx.stroke();
+  // Frost border
+  ctx.strokeStyle=`rgba(150,230,255,${0.6+prog*0.3})`; ctx.lineWidth=2;
+  ctx.strokeRect(x-hw-2,y-hh-3,w2,h2);
+  // Timer shimmer at bottom
+  ctx.fillStyle=`rgba(100,200,255,${prog*0.5})`;
+  ctx.fillRect(x-hw-2, y+hh-2, Math.round(w2*prog), 5);
+  ctx.restore();
+
+  // Floating ice crystals
+  if(frameCount%4===0 && z.frozenTimer>10){
+    const a=Math.random()*Math.PI*2;
+    particles.push({x:z.x+(Math.random()-0.5)*z.w,y:z.y-(Math.random()*z.h*0.5),
+      vx:Math.cos(a)*0.3, vy:-0.4-Math.random()*0.5,
+      life:25,maxLife:25,color:Math.random()<0.5?'#aaeeff':'#ffffff',
+      sz:2+Math.random()*2,type:'star'});
+  }
+}
+
+// ── DRAW ICE CHUNK PARTICLE ──
+function drawIceChunkParticle(p,scx,scy){
+  const ratio=p.life/p.maxLife;
+  ctx.save();
+  ctx.globalAlpha=ratio;
+  ctx.translate(scx,scy);
+  ctx.rotate(p.rot||0);
+  const sz2=Math.max(1,Math.round(p.sz*ZOOM*0.42*(0.5+ratio*0.5)));
+  if(p.isIce){
+    // Crystal shape: small diamond
+    ctx.fillStyle=p.color;
+    ctx.shadowColor='#aaeeff'; ctx.shadowBlur=5;
+    ctx.beginPath();
+    ctx.moveTo(0,-sz2); ctx.lineTo(sz2*0.7,0); ctx.lineTo(0,sz2); ctx.lineTo(-sz2*0.7,0);
+    ctx.closePath(); ctx.fill();
+    // Glint
+    ctx.fillStyle='rgba(255,255,255,0.7)';
+    ctx.fillRect(-1,-Math.ceil(sz2*0.5),2,Math.ceil(sz2*0.5));
+  } else {
+    // Regular chunk (blood-stained)
+    ctx.fillStyle=p.color;
+    ctx.fillRect(-Math.ceil(sz2/2),-Math.ceil(sz2/2),sz2,sz2);
+  }
+  ctx.restore();
+}
+
+// ── DRAW ICE BALL ──
+function drawIceBall(){
+  if(!fx.iceBall.active) return;
+}
+
+// ── ICE BALL AURA on main ball + screen vignette ──
+function drawIceBallAura(){
+  if(!fx.iceBall.active) return;
+
+  // Icy screen vignette
+  const prog = fx.iceBall.timer / fx.iceBall.max;
+  const vgGrad = ctx.createRadialGradient(VW/2,VH/2,VH*0.18,VW/2,VH/2,VH*0.75);
+  vgGrad.addColorStop(0,'rgba(0,200,255,0)');
+  vgGrad.addColorStop(1,`rgba(0,80,140,${0.18*prog})`);
+  ctx.fillStyle=vgGrad; ctx.fillRect(0,0,VW,VH);
+
+  // Pulsing ice aura ring around ball
+  const bArc=ball.active?Math.round(ball.z):0;
+  const bx=Math.round(sx(ball.x)), by=Math.round(sy(ball.y))-bArc;
+  const pulse=0.55+0.45*Math.sin(frameCount*0.22);
+  ctx.save();
+  ctx.globalAlpha=0.55*pulse;
+  ctx.shadowColor='#aaeeff'; ctx.shadowBlur=18;
+  ctx.strokeStyle='#aaeeff'; ctx.lineWidth=2.5;
+  ctx.beginPath(); ctx.arc(bx,by,ball.r*ZOOM*0.46+5,0,Math.PI*2); ctx.stroke();
+  // Inner glow
+  ctx.globalAlpha=0.25*pulse;
+  ctx.strokeStyle='#ffffff'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.arc(bx,by,ball.r*ZOOM*0.46+2,0,Math.PI*2); ctx.stroke();
+  ctx.shadowBlur=0;
+  ctx.restore();
+
+  // Floating ice crystals around ball
+  if(frameCount%5===0){
+    const a=Math.random()*Math.PI*2, r=ball.r*ZOOM*0.5+Math.random()*8;
+    particles.push({
+      x:ball.x+Math.cos(a)*(ball.r+4)/ZOOM, y:ball.y+Math.sin(a)*(ball.r+4)/ZOOM,
+      vx:Math.cos(a)*0.25, vy:Math.sin(a)*0.25-0.3,
+      life:18, maxLife:18,
+      color:Math.random()<0.5?'#aaeeff':'#ffffff',
+      sz:2+Math.random()*2, type:'star'
+    });
+  }
+}
+
+
 function makeFireParticle(z){
   // Each fire particle: a big pixel block that floats up slowly with wobble
   const col=Math.random()<0.55?'#ff6d00':Math.random()<0.6?'#ffeb3b':'#ff3d00';
@@ -2231,9 +3919,16 @@ function igniteZombie(z){
   if(z.dead||z.onFire) return;
   z.onFire=true;
   z.fireTimer=180;      // 3s on fire before ash
-  z.fireFrozen=true;    // zombie freezes — can't move while burning
-  z.vx=0; z.vy=0;
-  z.knockX=0; z.knockY=0;
+  if(z.id==='giant'){
+    z.fireFrozen=false; // giant keeps moving while burning
+    z.fireHpDrain=3;    // total HP to drain over the burn (3 hits over 180 frames)
+    z.fireHpDrained=0;  // HP already drained so far
+    z.fireHpTickTimer=0;// frames since last HP tick
+  } else {
+    z.fireFrozen=true;  // normal zombies freeze while burning
+    z.vx=0; z.vy=0;
+    z.knockX=0; z.knockY=0;
+  }
   z.fireParticles=[];
   for(let i=0;i<12;i++) z.fireParticles.push(makeFireParticle(z));
 }
@@ -2252,6 +3947,19 @@ function fireShotgun(){
 
   SFX.shotgunFire(); screenBlast(8);
 
+  // ── Shotgun touche la tête du serpent ──
+  if(snake.active&&!snake.dead&&(snake.state==='roaming'||snake.state==='surfacing')&&snake.alpha>0.3){
+    const head=snake.segs[0];
+    const dx2=head.x-player.x, dy2=head.y-player.y;
+    const ang2=Math.atan2(dy2,dx2);
+    let diff2=ang2-baseAng;
+    while(diff2>Math.PI) diff2-=Math.PI*2;
+    while(diff2<-Math.PI) diff2+=Math.PI*2;
+    if(Math.abs(diff2)<Math.PI*0.12){
+      hitSnakeBoss(dirX,dirY);
+    }
+  }
+
   // Kill all zombies in narrow beam to screen edge (±15°)
   for(const z of zombies){
     if(z.dead||z.emerging>0) continue;
@@ -2261,13 +3969,17 @@ function fireShotgun(){
     while(diff>Math.PI) diff-=Math.PI*2;
     while(diff<-Math.PI) diff+=Math.PI*2;
     if(Math.abs(diff)<Math.PI*0.08){
-      z.hp=0; z.dead=true; z.deadAnim=38;
-      score+=z.pts; totalKills++;
-      if(killsByType[z.id]!==undefined) killsByType[z.id]++;
-      z.knockX=dirX*9; z.knockY=dirY*9;
-      z.flyingCorpse=true;
-      goreExplosion(z.x,z.y,dirX,dirY,z.body);
-      scorePopup(z.x,z.y,z.pts);
+      if(z.id==='giant'){
+        damageGiant(z, dirX, dirY);
+      } else {
+        z.hp=0; z.dead=true; z.deadAnim=38;
+        score+=z.pts; totalKills++;
+        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+        z.knockX=dirX*9; z.knockY=dirY*9;
+        z.flyingCorpse=true;
+        goreExplosion(z.x,z.y,dirX,dirY,z.body);
+        scorePopup(z.x,z.y,z.pts);
+      }
     }
   }
   // Beam flash particles
@@ -2288,7 +4000,11 @@ function spawnThunder(){
   SFX.thunderStrike(); screenBlast(12);
   const visible=zombies.filter(z=>!z.dead&&z.emerging===0&&sx(z.x)>60&&sx(z.x)<VW-60&&sy(z.y)>60&&sy(z.y)<VH-60);
   let landX, landY;
-  if(visible.length>0 && Math.random()<0.75){
+  // Si le serpent est visible, 40% de chance de viser sa tête
+  if(snake.active&&!snake.dead&&(snake.state==='roaming'||snake.state==='surfacing')&&snake.alpha>0.3&&Math.random()<0.40){
+    landX=snake.segs[0].x+(Math.random()-0.5)*20;
+    landY=snake.segs[0].y+(Math.random()-0.5)*20;
+  } else if(visible.length>0 && Math.random()<0.75){
     const target=visible[Math.floor(Math.random()*visible.length)];
     landX=target.x+(Math.random()-0.5)*60; landY=target.y+(Math.random()-0.5)*40;
   } else {
@@ -2306,20 +4022,31 @@ function spawnThunder(){
 // Called when bolt reaches ground — explode zombies in radius
 function thunderImpact(landX, landY){
   screenBlast(14);
+  // ── Thunder touche la tête du serpent ──
+  if(snake.active&&!snake.dead&&(snake.state==='roaming'||snake.state==='surfacing')&&snake.alpha>0.3){
+    if(Math.hypot(snake.segs[0].x-landX, snake.segs[0].y-landY)<110){
+      hitSnakeBoss(0,0);
+    }
+  }
   let killed=0;
   for(const z of zombies){
     if(z.dead||killed>=6) continue;
-    if(Math.hypot(z.x-landX,z.y-landY)<90){
-      z.hp=0; z.dead=true; z.deadAnim=38;
-      score+=z.pts; totalKills++;
-      if(killsByType[z.id]!==undefined) killsByType[z.id]++;
-      const a=Math.atan2(z.y-landY,z.x-landX);
-      z.knockX=Math.cos(a)*5; z.knockY=Math.sin(a)*5; z.flyingCorpse=true;
-      goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.body);
-      scorePopup(z.x,z.y,z.pts);
-      particles.push({x:z.x+(Math.random()-0.5)*20,y:z.y+(Math.random()-0.5)*20,
-        vx:0,vy:0,life:720,maxLife:720,color:Math.random()<0.5?'#1a237e':'#212121',
-        sz:18+Math.random()*14,type:'puddle',gravity:0});
+    if(Math.hypot(z.x-landX,z.y-landY)<(z.id==='giant'?160:90)){
+      if(z.id==='giant'){
+        const a=Math.atan2(z.y-landY,z.x-landX);
+        damageGiant(z, Math.cos(a), Math.sin(a));
+      } else {
+        z.hp=0; z.dead=true; z.deadAnim=38;
+        score+=z.pts; totalKills++;
+        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+        const a=Math.atan2(z.y-landY,z.x-landX);
+        z.knockX=Math.cos(a)*5; z.knockY=Math.sin(a)*5; z.flyingCorpse=true;
+        goreExplosion(z.x,z.y,Math.cos(a),Math.sin(a),z.body);
+        scorePopup(z.x,z.y,z.pts);
+        particles.push({x:z.x+(Math.random()-0.5)*20,y:z.y+(Math.random()-0.5)*20,
+          vx:0,vy:0,life:720,maxLife:720,color:Math.random()<0.5?'#1a237e':'#212121',
+          sz:18+Math.random()*14,type:'puddle',gravity:0});
+      }
       killed++;
     }
   }
@@ -2335,6 +4062,20 @@ function thunderImpact(landX, landY){
 function update(){
   frameCount++;
   if(cam.shake>0) cam.shake *= 0.8;
+
+  // ── Low HP Freeze: pause game 2s at ≤20% HP to allow Mega Dash ──
+  if(!megaDash.lowHpFreezeTriggered && !megaDash.lowHpUsed && !megaDash.active &&
+     player.hp > 0 && player.hp <= 20){
+    megaDash.lowHpFreezeTriggered = true;
+    megaDash.lowHpFreezeTimer = 120; // 2 seconds at 60fps
+  }
+  if(megaDash.lowHpFreezeTimer > 0){
+    megaDash.lowHpFreezeTimer--;
+    megaDash.lowHpBtn = true;
+    // Skip rest of update to freeze game logic
+    updateCamera();
+    return;
+  }
 
   // ── Powerup unlock at wave 2 ──
   if(!powerupsUnlocked && wave >= 2){
@@ -2411,12 +4152,54 @@ function update(){
     }
   }
 
+  // ── Ice trail tick ──
+  for(let i=iceTrails.length-1;i>=0;i--){
+    const it=iceTrails[i];
+    it.life--;
+    if(it.pixels){
+      for(const p of it.pixels){
+        if(p.type==='spark'){ p.ox+=p.vox+(Math.random()-0.5)*0.12; p.oy+=p.voy; p.vox*=0.95; }
+      }
+    }
+    if(it.life<=0){ iceTrails.splice(i,1); }
+  }
+
+  // ── Frozen zombie tick ──
+  for(const z of zombies){
+    if(!z.frozen||z.dead) continue;
+    z.vx=0; z.vy=0; z.knockX=0; z.knockY=0;
+    z.frozenTimer--;
+    if(z.frozenTimer<=0) iceExplode(z);
+  }
+
   // ── Zombie fire tick ──
   for(const z of zombies){
     if(!z.onFire||z.dead) continue;
     z.fireTimer--;
 
-    // Frozen while on fire — override velocity to zero
+    // Giant: drain HP progressively (3 HP total over 180 frames = 1 HP every 60f)
+    if(z.id==='giant' && z.fireHpDrained < z.fireHpDrain){
+      z.fireHpTickTimer = (z.fireHpTickTimer||0) + 1;
+      if(z.fireHpTickTimer >= 60){
+        z.fireHpTickTimer = 0;
+        z.fireHpDrained = (z.fireHpDrained||0) + 1;
+        z.hp = Math.max(0, z.hp - 1);
+        z.hitFlash = 10;
+        blood(z.x, z.y, 8);
+        SFX.bigHit();
+        if(z.hp <= 0){
+          z.onFire=false; z.fireFrozen=false; z.fireParticles=[];
+          z.dead=true; z.deadAnim=60; z.flyingCorpse=false;
+          score+=z.pts; totalKills++;
+          if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+          scorePopup(z.x,z.y,z.pts);
+          giantDeathExplosion(z, 0, 0);
+          continue;
+        }
+      }
+    }
+
+    // Frozen while on fire — override velocity to zero (giants are NOT frozen)
     if(z.fireFrozen){ z.vx=0; z.vy=0; z.knockX=0; z.knockY=0; }
 
     // Update fire particles (slow simulation, runs every frame but moves slowly)
@@ -2446,36 +4229,48 @@ function update(){
 
     if(z.fireTimer<=0){
       z.onFire=false; z.fireFrozen=false; z.fireParticles=[];
-      // Zombie bursts apart — gore explosion + ash overlay
-      z.hp=0; z.dead=true; z.deadAnim=38;
-      score+=z.pts; totalKills++;
-      if(killsByType[z.id]!==undefined) killsByType[z.id]++;
-      scorePopup(z.x,z.y,z.pts);
-      SFX.explode(); screenBlast(5);
-      // Flying corpse burst outward
-      const burstA=Math.random()*Math.PI*2;
-      z.knockX=Math.cos(burstA)*5; z.knockY=Math.sin(burstA)*5;
-      z.flyingCorpse=true;
-      // Gore (smaller, charred — dark colors)
-      for(let i=0;i<20;i++){
-        const a=Math.random()*Math.PI*2, spd=(1+Math.random()*3)*0.5;
-        particles.push({x:z.x+(Math.random()-0.5)*z.w, y:z.y+(Math.random()-0.5)*z.h,
-          vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-0.5,
-          life:300, maxLife:300,
-          color:i%3===0?'#424242':i%3===1?'#212121':'#616161',
-          sz:3+Math.random()*5, type:'chunk', gravity:0.18,
-          bounceCount:0, landed:false,
-          rot:Math.random()*Math.PI*2, rotV:(Math.random()-0.5)*0.3,
-          groundY:z.y+8+Math.random()*12});
-      }
-      // Ash cloud puddles on ground
-      for(let i=0;i<12;i++){
-        const a=Math.random()*Math.PI*2, spd=0.3+Math.random()*1.2;
-        particles.push({x:z.x+(Math.random()-0.5)*z.w, y:z.y+(Math.random()-0.5)*z.h,
-          vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-0.3,
-          life:300, maxLife:300,
-          color:i%2===0?'#616161':'#9e9e9e',
-          sz:4+Math.random()*6, type:'puddle', gravity:0});
+      if(z.id==='giant'){
+        // Giant survived the fire (HP already drained progressively); just extinguish
+        z.fireHpDrained=0; z.fireHpTickTimer=0;
+        // Small smoke puff
+        for(let i=0;i<6;i++){
+          const a=Math.random()*Math.PI*2;
+          particles.push({x:z.x+(Math.random()-0.5)*z.w, y:z.y-(Math.random()*z.h*0.5),
+            vx:Math.cos(a)*0.5, vy:Math.sin(a)*0.5-0.8,
+            life:40, maxLife:40, color:'#616161', sz:5+Math.random()*6, type:'star', gravity:0});
+        }
+      } else {
+        // Zombie bursts apart — gore explosion + ash overlay
+        z.hp=0; z.dead=true; z.deadAnim=38;
+        score+=z.pts; totalKills++;
+        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+        scorePopup(z.x,z.y,z.pts);
+        SFX.explode(); screenBlast(5);
+        // Flying corpse burst outward
+        const burstA=Math.random()*Math.PI*2;
+        z.knockX=Math.cos(burstA)*5; z.knockY=Math.sin(burstA)*5;
+        z.flyingCorpse=true;
+        // Gore (smaller, charred — dark colors)
+        for(let i=0;i<20;i++){
+          const a=Math.random()*Math.PI*2, spd=(1+Math.random()*3)*0.5;
+          particles.push({x:z.x+(Math.random()-0.5)*z.w, y:z.y+(Math.random()-0.5)*z.h,
+            vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-0.5,
+            life:300, maxLife:300,
+            color:i%3===0?'#424242':i%3===1?'#212121':'#616161',
+            sz:3+Math.random()*5, type:'chunk', gravity:0.18,
+            bounceCount:0, landed:false,
+            rot:Math.random()*Math.PI*2, rotV:(Math.random()-0.5)*0.3,
+            groundY:z.y+8+Math.random()*12});
+        }
+        // Ash cloud puddles on ground
+        for(let i=0;i<12;i++){
+          const a=Math.random()*Math.PI*2, spd=0.3+Math.random()*1.2;
+          particles.push({x:z.x+(Math.random()-0.5)*z.w, y:z.y+(Math.random()-0.5)*z.h,
+            vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-0.3,
+            life:300, maxLife:300,
+            color:i%2===0?'#616161':'#9e9e9e',
+            sz:4+Math.random()*6, type:'puddle', gravity:0});
+        }
       }
     }
   }
@@ -2522,15 +4317,41 @@ function update(){
 
   // Reset lowHpUsed when player heals back above 30%
   if(megaDash.lowHpUsed && player.hp>30) megaDash.lowHpUsed=false;
+  // Reset freeze trigger when player heals back above 30%
+  if(megaDash.lowHpFreezeTriggered && player.hp>30) megaDash.lowHpFreezeTriggered=false;
 
   // ── Continuous spawner ──
-  targetCount = 8 + Math.floor(totalKills * 0.35) + wave * 3;
+  const bossActive = snake.active && !snake.dead;
+  const bossJustDied = !snake.active && snake.announced; // boss a existé mais plus actif
   const alive = zombies.filter(z=>!z.dead).length;
   spawnTimer++;
-  // Block spawning during wave break (2s pause between waves)
-  const spawnRate = (alive < targetCount && waveBreakTimer<=0) ? Math.max(1, 8 - Math.floor(totalKills/20)) : 0;
-  if(spawnRate>0 && spawnTimer % spawnRate === 0){
-    spawnZombie(false);
+
+  if(bossActive){
+    if(biome===3){
+      // Cimetière (stage final) : AUCUNE limite de zombies pendant le boss — spawn illimité
+      targetCount = 8 + Math.floor(totalKills * 0.35) + wave * 3;
+      const spawnRateBoss = (alive < targetCount && waveBreakTimer<=0) ? Math.max(1, 8 - Math.floor(totalKills/20)) : 0;
+      if(spawnRateBoss>0 && spawnTimer % spawnRateBoss === 0) spawnZombie(false);
+    } else {
+      // Autres biomes pendant le boss : max 10 zombies — spawn lent toutes les 3s
+      const bossZombieMax = 10;
+      targetCount = bossZombieMax;
+      snake.bossZombieSpawnTimer = (snake.bossZombieSpawnTimer || 0) + 1;
+      if(alive < bossZombieMax && snake.bossZombieSpawnTimer >= snake.bossZombieSpawnRate){
+        snake.bossZombieSpawnTimer = 0;
+        spawnZombie(false);
+      }
+    }
+    // Powerup interval réduit de moitié pendant le boss (géré dans initSnakeBoss)
+  } else if(bossJustDied){
+    // Après la mort du boss : spawn illimité (comme sans boss)
+    targetCount = 8 + Math.floor(totalKills * 0.35) + wave * 3;
+    const spawnRate2 = (alive < targetCount && waveBreakTimer<=0) ? Math.max(1, 8 - Math.floor(totalKills/20)) : 0;
+    if(spawnRate2>0 && spawnTimer % spawnRate2 === 0) spawnZombie(false);
+  } else {
+    targetCount = 8 + Math.floor(totalKills * 0.35) + wave * 3;
+    const spawnRate3 = (alive < targetCount && waveBreakTimer<=0) ? Math.max(1, 8 - Math.floor(totalKills/20)) : 0;
+    if(spawnRate3>0 && spawnTimer % spawnRate3 === 0) spawnZombie(false);
   }
 
   // ── Ball (main) ──
@@ -2547,9 +4368,12 @@ function update(){
     ball.y = player.y + player.h/2 - ball.r - ballBounceY;
     ball.spin = ball.footSpin;
     if(player.stunned<=0) shootCooldown--;
-    if(shootCooldown<=0 && player.stunned<=0){
+    const canShoot = shootCooldown<=0 && player.stunned<=0;
+    const wantsShoot = autoKick || manualKickRequest;
+    if(canShoot && wantsShoot){
       const t=nearestVisible();
       if(t){
+        manualKickRequest = false; // consumed by main ball
         const dx=t.x-ball.x, dy=t.y-ball.y, d=Math.sqrt(dx*dx+dy*dy);
         ball.vx=(dx/d)*4.5; ball.vy=(dy/d)*4.5;
         ball.active=true; ball.returning=false;
@@ -2558,7 +4382,11 @@ function update(){
         ball.hitZombies=[];
         player.kickAnim=18;
         SFX.kick();
+      } else {
+        manualKickRequest = false; // no target, consume anyway
       }
+    } else {
+      if(!wantsShoot) manualKickRequest = false;
     }
   } else {
     ball.x+=ball.vx; ball.y+=ball.vy;
@@ -2596,14 +4424,37 @@ function update(){
       }
       fireTrails.push(seg);
     }
+    // Ice ball trail
+    if(fx.iceBall.active && !ball.returning && frameCount%3===0) makeIceBallTrail(ball);
+
     if(!ball.returning){
       let didBounce=false;
+      // ── Collision balle → Boss Serpent ──
+      if(checkBallSnakeHit(ball.x,ball.y,ball.vx,ball.vy)){
+        ball.returning=true;
+        const ang=Math.atan2(player.y-ball.y,player.x-ball.x);
+        ball.vx=Math.cos(ang)*4; ball.vy=Math.sin(ang)*4; ball.z=0; ball.zv=2;
+      }
       for(const z of zombies){
         if(z.dead||z.emerging>0) continue;
         if(ball.hitZombies&&ball.hitZombies.includes(z)) continue;
         const dx=ball.x-z.x, dy=ball.y-z.y, d=Math.sqrt(dx*dx+dy*dy);
-        if(d<z.w/2+ball.r){
+        // Pour le géant : rayon de collision étendu pour couvrir tête+corps+jambes
+        const zRadius = z.id==='giant' ? z.w/2 : z.w/2;
+        if(d<zRadius+ball.r){
           if(ball.hitZombies) ball.hitZombies.push(z);
+          if(fx.iceBall.active){
+            if(!z.frozen){ freezeZombie(z); } sfxIceHit();
+            if(ball.ricochetsLeft>0){
+              const next=zombies.filter(z2=>!z2.dead&&!z2.frozen&&z2.emerging===0&&!(ball.hitZombies&&ball.hitZombies.includes(z2)))
+                .sort((a2,b2)=>Math.hypot(a2.x-z.x,a2.y-z.y)-Math.hypot(b2.x-z.x,b2.y-z.y))[0];
+              if(next){ ball.ricochetsLeft--; const nx=next.x-ball.x,ny=next.y-ball.y,nd2=Math.sqrt(nx*nx+ny*ny)||1;
+                ball.vx=(nx/nd2)*4.5; ball.vy=(ny/nd2)*4.5; ball.z=0; ball.zv=2; didBounce=true; break; }
+            }
+            ball.returning=true;
+            const ang=Math.atan2(player.y-ball.y,player.x-ball.x);
+            ball.vx=Math.cos(ang)*4; ball.vy=Math.sin(ang)*4; ball.z=0; ball.zv=2; break;
+          }
           if(fx.fireBall.active){
             igniteZombie(z); SFX.hit();
             if(ball.ricochetsLeft>0){
@@ -2620,13 +4471,24 @@ function update(){
           const nd=d||1; z.knockX=(dx/nd)*5; z.knockY=(dy/nd)*5;
           SFX.hit();
           if(z.hp<=0){
-            z.dead=true; z.deadAnim=38; score+=z.pts; totalKills++;
-            if(killsByType[z.id]!==undefined) killsByType[z.id]++;
-            const bdx=ball.vx/(Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy)||1);
-            const bdy=ball.vy/(Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy)||1);
-            const bf=7+Math.random()*3; // was 14+random*6, halved
-            z.knockX=bdx*bf; z.knockY=bdy*bf; z.flyingCorpse=true;
-            goreExplosion(z.x,z.y,bdx,bdy,z.body); scorePopup(z.x,z.y,z.pts); SFX.explode(); screenBlast(6);
+            if(z.id==='giant'){
+              const bdx=ball.vx/(Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy)||1);
+              const bdy=ball.vy/(Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy)||1);
+              // hp already decremented; check if really dead
+              z.hp=0; z.dead=true; z.deadAnim=60; z.flyingCorpse=false;
+              score+=z.pts; totalKills++;
+              if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+              scorePopup(z.x,z.y,z.pts);
+              giantDeathExplosion(z, bdx, bdy);
+            } else {
+              z.dead=true; z.deadAnim=38; score+=z.pts; totalKills++;
+              if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+              const bdx=ball.vx/(Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy)||1);
+              const bdy=ball.vy/(Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy)||1);
+              const bf=7+Math.random()*3;
+              z.knockX=bdx*bf; z.knockY=bdy*bf; z.flyingCorpse=true;
+              goreExplosion(z.x,z.y,bdx,bdy,z.body); scorePopup(z.x,z.y,z.pts); SFX.explode(); screenBlast(6);
+            }
             if(ball.ricochetsLeft>0){
               const next=zombies.filter(z2=>!z2.dead&&!z2.onFire&&z2.emerging===0&&!(ball.hitZombies&&ball.hitZombies.includes(z2)))
                 .sort((a2,b2)=>Math.hypot(a2.x-z.x,a2.y-z.y)-Math.hypot(b2.x-z.x,b2.y-z.y))[0];
@@ -2634,7 +4496,7 @@ function update(){
                 ball.vx=(nx/nd2)*4.5; ball.vy=(ny/nd2)*4.5; ball.z=0; ball.zv=2; didBounce=true; break; }
             }
           } else {
-            if(z.id==='big'||z.id==='tank') SFX.bigHit(); else SFX.growl();
+            if(z.id==='big'||z.id==='tank'||z.id==='giant') SFX.bigHit(); else SFX.growl();
           }
           if(!didBounce){
             ball.returning=true;
@@ -2644,7 +4506,9 @@ function update(){
           break;
         }
       }
-      if(!didBounce&&!ball.returning&&(ball.x<PITCH.x||ball.x>PITCH.x+PITCH.w||ball.y<PITCH.y||ball.y>PITCH.y+PITCH.h)){
+      // Retour si le ballon sort de l'écran (limites écran en coordonnées monde)
+      const bsx=sx(ball.x), bsy=sy(ball.y);
+      if(!didBounce&&!ball.returning&&(bsx<0||bsx>VW||bsy<0||bsy>VH)){
         ball.returning=true;
         const ang=Math.atan2(player.y-ball.y,player.x-ball.x);
         ball.vx=Math.cos(ang)*4; ball.vy=Math.sin(ang)*4;
@@ -2652,31 +4516,59 @@ function update(){
     } else {
       const retX=player.x+player.dir*8, retY=player.y+player.h/2-ball.r;
       const dx=retX-ball.x, dy=retY-ball.y, d=Math.sqrt(dx*dx+dy*dy);
-      if(d<14){ ball.active=false; ball.returning=false; ball.footSpin=ball.spin; shootCooldown=currentMaxCD2; }
+      if(d<14){ ball.active=false; ball.returning=false; ball.footSpin=ball.spin; shootCooldown=0; }
       else{ ball.vx=(dx/d)*4.25; ball.vy=(dy/d)*4.25; }
     }
   }
 
   // ── Extra balls update ──
-  // Foot positions offsets for extra balls (fixed relative to player, not direction-dependent)
-  const EPOS=[{ox:-10,oy:0},{ox:0,oy:-14},{ox:0,oy:14}];
+  // Position des extra balls : cercle dynamique autour du joueur
+  // Pour 1-4 extra balls : positions fixes (gauche, haut, bas, droite-haut)
+  // Pour 5-7 extra balls : cercle complet divisé équitablement
+  const N = extraBalls.length;
+  function getExtraBallOffset(bi){
+    if(N >= 5){
+      // Cercle complet : N positions réparties à 360/N degrés
+      const angle = (bi / N) * Math.PI * 2 - Math.PI / 2; // commence en haut
+      const r = 16;
+      return { ox: Math.cos(angle)*r, oy: Math.sin(angle)*r };
+    } else {
+      // Positions fixes pour 1-4 extra balls
+      const FIXED = [
+        { ox:-10, oy:0   },
+        { ox:0,   oy:-14 },
+        { ox:0,   oy:14  },
+        { ox:12,  oy:0   },
+      ];
+      return FIXED[bi] || { ox:0, oy:0 };
+    }
+  }
+
+  // Extra balls always require manual kick (space/tap), never auto.
+  // manualKickRequest may still be true if main ball was in flight (didn't consume it).
+  // One tap fires one available extra ball.
+  let extraKickConsumed = false;
+
   for(let bi=0;bi<extraBalls.length;bi++){
     const eb=extraBalls[bi];
-    const epos=EPOS[bi];
+    const epos=getExtraBallOffset(bi);
     eb.bounce+=0.18;
     const ebBY=Math.abs(Math.sin(eb.bounce))*5;
     if(!eb.active){
       eb.x=player.x+epos.ox;
       eb.y=player.y+epos.oy+player.h/2-eb.r-ebBY;
       eb.spin=eb.footSpin;
-      eb.shootCooldown--;
-      if(eb.shootCooldown<=0 && player.stunned<=0){
+      // Fire on manual request — first available ball gets the shot
+      if(!extraKickConsumed && manualKickRequest && player.stunned<=0){
         const t2=nearestVisible();
         if(t2){
           const dx=t2.x-eb.x,dy=t2.y-eb.y,d=Math.sqrt(dx*dx+dy*dy)||1;
           eb.vx=(dx/d)*4.5; eb.vy=(dy/d)*4.5;
           eb.active=true; eb.returning=false; eb.z=0; eb.zv=3;
           eb.ricochetsLeft=ricochetCount; eb.hitZombies=[];
+          extraKickConsumed = true;
+          manualKickRequest = false; // consumed
+          SFX.kick();
         }
       }
     } else {
@@ -2690,13 +4582,32 @@ function update(){
         for(let i=0;i<nSp;i++) seg.pixels.push({type:'spark',ox:(Math.random()-0.5)*14,oy:-(8+Math.random()*16),vox:(Math.random()-0.5)*0.25,voy:-(0.3+Math.random()*0.4),sz:2+Math.floor(Math.random()*3),col:Math.random()<0.6?'#ffeb3b':'#fff9c4',birthLife:120});
         fireTrails.push(seg);
       }
+      if(fx.iceBall.active && !eb.returning && frameCount%3===0) makeIceBallTrail(eb);
       if(!eb.returning){
+        // ── Collision extra ball → Boss Serpent ──
+        if(checkBallSnakeHit(eb.x,eb.y,eb.vx,eb.vy)){
+          eb.returning=true;
+          const ang=Math.atan2(player.y-eb.y,player.x-eb.x);
+          eb.vx=Math.cos(ang)*4; eb.vy=Math.sin(ang)*4; eb.z=0; eb.zv=2;
+        }
         for(const z of zombies){
           if(z.dead||z.emerging>0) continue;
           if(eb.hitZombies&&eb.hitZombies.includes(z)) continue;
           const dx=eb.x-z.x,dy=eb.y-z.y,d=Math.sqrt(dx*dx+dy*dy);
-          if(d<z.w/2+eb.r){
+          const zRadius2 = z.id==='giant' ? z.w/2 : z.w/2;
+          if(d<zRadius2+eb.r){
             if(eb.hitZombies) eb.hitZombies.push(z);
+            if(fx.iceBall.active){
+              if(!z.frozen){ freezeZombie(z); } sfxIceHit();
+              if(eb.ricochetsLeft>0){
+                const next=zombies.filter(z2=>!z2.dead&&!z2.frozen&&z2.emerging===0&&!(eb.hitZombies&&eb.hitZombies.includes(z2)))
+                  .sort((a2,b2)=>Math.hypot(a2.x-z.x,a2.y-z.y)-Math.hypot(b2.x-z.x,b2.y-z.y))[0];
+                if(next){ eb.ricochetsLeft--; const nx=next.x-eb.x,ny=next.y-eb.y,nd2=Math.sqrt(nx*nx+ny*ny)||1;
+                  eb.vx=(nx/nd2)*4.5; eb.vy=(ny/nd2)*4.5; eb.z=0; eb.zv=2; break; }
+              }
+              eb.returning=true; const angI=Math.atan2(player.y-eb.y,player.x-eb.x);
+              eb.vx=Math.cos(angI)*4; eb.vy=Math.sin(angI)*4; eb.z=0; eb.zv=2; break;
+            }
             if(fx.fireBall.active){ igniteZombie(z); SFX.hit(); }
             else {
               z.hp--; z.hitFlash=10; blood(z.x,z.y,10);
@@ -2721,7 +4632,8 @@ function update(){
             eb.vx=Math.cos(ang)*4; eb.vy=Math.sin(ang)*4; eb.z=0; eb.zv=2; break;
           }
         }
-        if(!eb.returning&&(eb.x<PITCH.x||eb.x>PITCH.x+PITCH.w||eb.y<PITCH.y||eb.y>PITCH.y+PITCH.h)){
+        const ebsx=sx(eb.x), ebsy=sy(eb.y);
+        if(!eb.returning&&(ebsx<0||ebsx>VW||ebsy<0||ebsy>VH)){
           eb.returning=true;
           const ang=Math.atan2(player.y-eb.y,player.x-eb.x);
           eb.vx=Math.cos(ang)*4; eb.vy=Math.sin(ang)*4;
@@ -2729,7 +4641,7 @@ function update(){
       } else {
         const rx=player.x+epos.ox, ry=player.y+epos.oy+player.h/2-eb.r;
         const dx=rx-eb.x,dy=ry-eb.y,d=Math.sqrt(dx*dx+dy*dy);
-        if(d<14){ eb.active=false; eb.returning=false; eb.footSpin=eb.spin; eb.shootCooldown=40+bi*15; }
+        if(d<14){ eb.active=false; eb.returning=false; eb.footSpin=eb.spin; eb.shootCooldown=0; }
         else{ eb.vx=(dx/d)*4.25; eb.vy=(dy/d)*4.25; }
       }
     }
@@ -2765,7 +4677,8 @@ function update(){
     if(frameCount%4===0){
       for(const z of zombies){
         if(z.dead||z.onFire||z.emerging>0) continue;
-        if(Math.hypot(z.x-ft.x,z.y-ft.y)<z.w/2+14) igniteZombie(z);
+        const fireHitR = z.id==='giant' ? z.w/2+14 : z.w/2+14;
+        if(Math.hypot(z.x-ft.x,z.y-ft.y)<fireHitR) igniteZombie(z);
       }
     }
   }
@@ -2806,6 +4719,8 @@ function update(){
     if(z.emerging>0){ z.emerging--; z.vx=0; z.vy=0; continue; } // still digging
     // Frozen by fire — stays immobile
     if(z.fireFrozen){ z.vx=0; z.vy=0; z.knockX=0; z.knockY=0; continue; }
+    // Frozen by ice ball — stays immobile
+    if(z.frozen){ z.vx=0; z.vy=0; z.knockX=0; z.knockY=0; continue; }
     // ── Speed phases: 5 phases based on totalKills, hard cap at phase 5 ──
     // Phase thresholds (kills needed to reach each phase)
     // Phase 1: 0–19  → ×1.0  (base)
@@ -2823,11 +4738,108 @@ function update(){
     const globalMult = zombieSpeedMult * (z.speedVariant||1);
     const speedScale = killBoost * globalMult;
     const slowScale = fx.slowMo.active ? 0.15 : 1;
+
+    // ── GIANT JUMP MECHANIC ──
+    if(z.id==='giant'){
+      if(z.jumpCooldown>0) z.jumpCooldown--;
+
+      // Phase 0 → 1: start charge if cooldown expired and far enough
+      if(z.jumpPhase===0 && z.jumpCooldown<=0 && d > 80){
+        z.jumpPhase=1;
+        z.jumpTimer=50; // charge frames
+        z.jumpTargetX = player.x + ((player.vx||0)*8);
+        z.jumpTargetY = player.y + ((player.vy||0)*8);
+        z.jumpTargetX = Math.max(PITCH.x+40, Math.min(PITCH.x+PITCH.w-40, z.jumpTargetX));
+        z.jumpTargetY = Math.max(PITCH.y+40, Math.min(PITCH.y+PITCH.h-40, z.jumpTargetY));
+        z.jumpStartX = z.x; z.jumpStartY = z.y;
+        z.jumpDuration = 45;
+        z.jumpArcH = 120 + Math.random()*60;
+        SFX.giantLeap();
+      }
+
+      // Phase 1: charging — stomp in place, freeze movement
+      if(z.jumpPhase===1){
+        z.jumpTimer--;
+        z.vx=0; z.vy=0; z.knockX=0; z.knockY=0;
+        if(z.hitFlash>0) z.hitFlash--;
+        z.animFrame=Math.floor(frameCount/6)%2;
+        if(z.jumpTimer<=0){ z.jumpPhase=2; z.jumpTimer=z.jumpDuration; z.jumpArc=0; }
+        z.x=Math.max(PITCH.x+z.w/2, Math.min(PITCH.x+PITCH.w-z.w/2, z.x));
+        z.y=Math.max(PITCH.y+z.h/2, Math.min(PITCH.y+PITCH.h-z.h/2, z.y));
+        continue;
+      }
+
+      // Phase 2: airborne — parabolic arc toward target
+      if(z.jumpPhase===2){
+        z.jumpTimer--;
+        const t2 = 1 - (z.jumpTimer / z.jumpDuration);
+        z.x = z.jumpStartX + (z.jumpTargetX - z.jumpStartX)*t2;
+        z.y = z.jumpStartY + (z.jumpTargetY - z.jumpStartY)*t2;
+        z.jumpArc = (z.jumpArcH||120) * Math.sin(t2*Math.PI);
+        z.dir = (z.jumpTargetX >= z.jumpStartX) ? 1 : -1;
+        z.vx=0; z.vy=0; z.knockX=0; z.knockY=0;
+        z.animFrame=Math.floor(frameCount/4)%2;
+        if(z.hitFlash>0) z.hitFlash--;
+        if(z.jumpTimer<=0){
+          // LANDING
+          z.jumpPhase=3; z.jumpTimer=22; z.jumpArc=0;
+          const crushR=100;
+          for(const oz of zombies){
+            if(oz===z||oz.dead||oz.id==='giant') continue;
+            const cdist=Math.hypot(oz.x-z.x, oz.y-z.y);
+            if(cdist<crushR){
+              oz.dead=true; oz.deadAnim=30; oz.flyingCorpse=true;
+              const ca=Math.atan2(oz.y-z.y, oz.x-z.x);
+              oz.knockX=Math.cos(ca)*9; oz.knockY=Math.sin(ca)*9;
+              goreExplosion(oz.x,oz.y,Math.cos(ca),Math.sin(ca),oz.skin||'#9e9e9e');
+              score+=Math.round((oz.pts||10)*0.5);
+              totalKills++;
+            } else if(cdist<crushR*2){
+              const ca=Math.atan2(oz.y-z.y,oz.x-z.x);
+              oz.knockX+=Math.cos(ca)*5*(1-(cdist/(crushR*2)));
+              oz.knockY+=Math.sin(ca)*5*(1-(cdist/(crushR*2)));
+            }
+          }
+          // Knock player if nearby
+          const pd=Math.hypot(player.x-z.x, player.y-z.y);
+          if(pd<crushR+player.w && !invincibleMode && !megaDash.active && !samurai.active){
+            player.hp-=1.5; player.hitFlash=25; player.stunned=30;
+            const pa=Math.atan2(player.y-z.y,player.x-z.x);
+            player.knockX=Math.cos(pa)*14; player.knockY=Math.sin(pa)*14;
+            SFX.playerScream();
+          }
+          SFX.giantLand();
+          screenBlast(24);
+          spawnDirt(z.x, z.y);
+          for(let pi=0;pi<18;pi++){
+            const pa2=Math.random()*Math.PI*2, ps=2+Math.random()*5;
+            particles.push({x:z.x+(Math.random()-0.5)*40,y:z.y+(Math.random()-0.5)*15,
+              vx:Math.cos(pa2)*ps,vy:Math.sin(pa2)*ps-1.5,
+              life:45+Math.random()*25,maxLife:70,
+              color:'rgba(160,130,80,0.75)',sz:7+Math.random()*9,type:'puddle',gravity:0});
+          }
+        }
+        continue;
+      }
+
+      // Phase 3: landing stun
+      if(z.jumpPhase===3){
+        z.jumpTimer--;
+        z.vx=0; z.vy=0;
+        if(z.hitFlash>0) z.hitFlash--;
+        z.x=Math.max(PITCH.x+z.w/2, Math.min(PITCH.x+PITCH.w-z.w/2, z.x));
+        z.y=Math.max(PITCH.y+z.h/2, Math.min(PITCH.y+PITCH.h-z.h/2, z.y));
+        z.animFrame=Math.floor(frameCount/10)%2;
+        if(z.jumpTimer<=0){ z.jumpPhase=0; z.jumpArc=0; z.jumpCooldown=300+Math.random()*180; }
+        continue;
+      }
+    }
+    // ── END GIANT JUMP ──
+
     z.vx=(dx/d)*z.spd*speedScale*slowScale+weavX; z.vy=(dy/d)*z.spd*speedScale*slowScale+weavY;
     z.dir = (player.x > z.x) ? 1 : -1; // face player
     z.knockX*=0.82; z.knockY*=0.82;
     z.x+=z.vx+z.knockX; z.y+=z.vy+z.knockY;
-    if(z.hitFlash>0) z.hitFlash--;
 
     z.x=Math.max(PITCH.x+z.w/2, Math.min(PITCH.x+PITCH.w-z.w/2, z.x));
     z.y=Math.max(PITCH.y+z.h/2, Math.min(PITCH.y+PITCH.h-z.h/2, z.y));
@@ -2853,16 +4865,17 @@ function update(){
     }
 
     // Attack player
-    if(d<z.w/2+player.w/2+3){
+    const zContactR = z.id==='giant' ? z.w/2 : z.w/2;
+    if(d<zContactR+player.w/2+3){
       if(megaDash.active) continue; // invincible during mega dash
       if(samurai.active) continue;  // invincible during samurai (sword kills on touch)
       if(invincibleMode) continue;  // invincible mode: freeze HP
-      const dmg = z.id==='big'?0.3:0.22;
+      const dmg = z.id==='big'?0.3:z.id==='giant'?0.5:0.22;
       player.hp -= dmg;
       if(frameCount%20===0){
         player.hitFlash=18;
-        player.stunned=62;
-        const kForce = z.id==='big'?7:5.5;
+        player.stunned = z.id==='fast' ? 20 : (z.id==='giant' || z.id==='big') ? 30 : 30;
+        const kForce = z.id==='giant'?11:z.id==='big'?7:5.5;
         player.knockX = (player.x-z.x)/d * kForce;
         player.knockY = (player.y-z.y)/d * kForce;
         player.hitDirX = (player.x-z.x)/d;
@@ -2946,14 +4959,19 @@ function update(){
       // Explode all alive zombies
       for(const z of zombies){
         if(z.dead) continue;
-        z.dead = true; z.deadAnim = 38;
-        score += z.pts; totalKills++;
-        if(killsByType[z.id]!==undefined) killsByType[z.id]++;
-        const a = Math.random()*Math.PI*2;
-        z.knockX = Math.cos(a)*12; z.knockY = Math.sin(a)*12;
-        z.flyingCorpse = true;
-        goreExplosion(z.x, z.y, Math.cos(a), Math.sin(a), z.body);
-        scorePopup(z.x, z.y, z.pts);
+        if(z.id==='giant'){
+          const a=Math.random()*Math.PI*2;
+          damageGiant(z, Math.cos(a), Math.sin(a));
+        } else {
+          z.dead = true; z.deadAnim = 38;
+          score += z.pts; totalKills++;
+          if(killsByType[z.id]!==undefined) killsByType[z.id]++;
+          const a = Math.random()*Math.PI*2;
+          z.knockX = Math.cos(a)*12; z.knockY = Math.sin(a)*12;
+          z.flyingCorpse = true;
+          goreExplosion(z.x, z.y, Math.cos(a), Math.sin(a), z.body);
+          scorePopup(z.x, z.y, z.pts);
+        }
       }
       SFX.bombExplode(); screenBlast(22);
       // Flash message handled by waveAnnounce
@@ -2963,34 +4981,71 @@ function update(){
   // ── Particles ──
   particles.forEach(p=>{
     if(p.type==='puddle'){
-      // Puddles don't move, just age
       p.life--;
       return;
     }
-    if(p.type==='chunk'||p.type==='dirt'){
+    // ── Giant head: bounces then shatters ──
+    if(p.type==='giantHead'){
+      if(!p.exploded){
+        p.vy += 0.38; // gravity
+        p.x  += p.vx;
+        p.y  += p.vy;
+        p.rot = (p.rot||0) + (p.rotV||0);
+        p.vx *= 0.97;
+        if(p.y >= p.groundY){
+          p.y = p.groundY;
+          p.bounces = (p.bounces||0) + 1;
+          if(p.bounces >= p.maxBounces){
+            // Head shatters — spawn gore chunks
+            p.exploded = true;
+            SFX.explode();
+            const headColors=[p.skin||'#9e9e9e','#111','#ff1744','#eee','#c62828'];
+            for(let i=0;i<22;i++){
+              const a=Math.random()*Math.PI*2, spd=1.5+Math.random()*5;
+              particles.push({
+                x:p.x+(Math.random()-0.5)*14, y:p.y+(Math.random()-0.5)*8,
+                vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-2,
+                life:480, maxLife:480,
+                color:headColors[Math.floor(Math.random()*headColors.length)],
+                sz:3+Math.random()*6, type:'chunk', gravity:0.18,
+                bounceCount:0, landed:false,
+                groundY:p.groundY+4+Math.random()*10,
+                rot:Math.random()*Math.PI*2, rotV:(Math.random()-0.5)*0.35
+              });
+            }
+            // Blood burst
+            blood(p.x, p.y, 18);
+            p.life = 0; // remove head particle
+          } else {
+            p.vy = -p.vy * (0.45 - p.bounces*0.1);
+            p.vx *= 0.55;
+            p.rotV = (p.rotV||0) * 0.6;
+            SFX.chunkLand();
+          }
+        }
+      }
+      p.life--;
+      return;
+    }
+    if(p.type==='chunk'||p.type==='dirt'||p.type==='iceChunk'){
       if(p.landed){
-        // Chunk is on ground — just age, no movement
         p.rotV*=0.85;
         if(p.rot!=null) p.rot+=p.rotV||0;
         p.life--;
         return;
       }
-      // In flight: apply gravity
       p.vy+=p.gravity||0.18;
       p.x+=p.vx; p.y+=p.vy;
-      p.vx*=0.92; // light air drag
+      p.vx*=0.92;
       if(p.rot!=null) p.rot+=p.rotV||0;
-      // Bounce when hitting "ground" (groundY)
       if(p.y >= (p.groundY||p.y+1) && p.bounceCount<2){
         p.y = p.groundY||p.y;
-        p.vy = -p.vy * (0.35 - p.bounceCount*0.12); // lose energy each bounce
+        p.vy = -p.vy * (0.35 - p.bounceCount*0.12);
         p.vx *= 0.6;
         p.rotV *= 0.5;
         p.bounceCount++;
-        // Organic thud SFX on first land (only for gore chunks, not dirt)
         if(p.bounceCount===1 && p.type==='chunk') SFX.chunkLand();
       } else if(p.y >= (p.groundY||p.y+1)){
-        // Done bouncing — stick to ground
         p.y = p.groundY||p.y;
         p.vx=0; p.vy=0; p.landed=true;
       }
@@ -3008,6 +5063,11 @@ function update(){
 
   updateCamera();
   updateBiome();
+
+  // ── Boss Serpent Squelette — spawn au désert (biome 1) et au cimetière (biome 3) ──
+  if((biome===1||biome===3) && !snake.active && !snake.dead && !snake.everSpawned) initSnakeBoss();
+  updateSnakeBoss();
+  updateSnakeFireballs();
 
   // ── Obstacle collisions (player + zombies, NOT balls) ──
   if(biomeObstacles.length>0){
@@ -3046,6 +5106,8 @@ function update(){
     }
   }
   waveAnnounce--;
+  // Refresh current target every frame for arrow display
+  nearestVisible();
 }
 
 // ══════════════════════════════════════
@@ -3272,7 +5334,7 @@ function drawPlayer(){
     // Stun bar
     const sbW=28, sbH=3, sbX=x-sbW/2, sbY=y-22;
     ctx.fillStyle='#222';ctx.fillRect(sbX,sbY,sbW,sbH);
-    ctx.fillStyle='#ffeb3b';ctx.fillRect(sbX,sbY,sbW*(player.stunned/62),sbH);
+    ctx.fillStyle='#ffeb3b';ctx.fillRect(sbX,sbY,sbW*(player.stunned/40),sbH);
     // "!" text
     ctx.fillStyle='#ffeb3b';ctx.font='bold 9px Courier New';ctx.textAlign='center';
     ctx.fillText('!',x,y-25);
@@ -3317,9 +5379,20 @@ function drawBall(){
 
   // Ball itself
   ctx.save();ctx.translate(bx,by);ctx.rotate(ball.spin);
-  ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(0,0,ball.r,0,Math.PI*2);ctx.fill();
-  ctx.fillStyle='#1a1a1a';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
-  [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='#333';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+  if(fx.iceBall.active){
+    // Icy blue-white ball
+    ctx.shadowColor='#aaeeff'; ctx.shadowBlur=14;
+    ctx.fillStyle='#ddf6ff';ctx.beginPath();ctx.arc(0,0,ball.r,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='rgba(100,200,255,0.7)';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
+    [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='rgba(150,220,255,0.9)';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+    // Crystal sparkle
+    ctx.fillStyle='rgba(255,255,255,0.9)';
+    ctx.fillRect(-1,-ball.r+2,2,3); ctx.fillRect(-ball.r+2,-1,3,2);
+  } else {
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(0,0,ball.r,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#1a1a1a';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
+    [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='#333';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+  }
   ctx.restore();
 }
 
@@ -3328,6 +5401,180 @@ function drawZombie(z){
   if(x<-55||x>VW+55||y<-65||y>VH+65)return;
   const hw=Math.round(z.w/2), hh=Math.round(z.h/2), sc=z.scale;
   const fl=z.hitFlash>0&&frameCount%2===0;
+
+  // ── GIANT: dessiné directement en pixels écran, proportions × (ZOOM*4/14 * 14) ──
+  // La hitbox monde est w:56,h:80 → en pixels écran: hw_px=56*ZOOM/2, hh_px=80*ZOOM/2
+  // On dessine en coordonnées écran (x,y) = centre du zombie à l'écran
+  if(z.id==='giant' && !z.dead && z.emerging===0){
+    // Le zombie normal est dessiné en pixels fixes (hw=7, hh=10 pour w:14, h:20)
+    // Le géant = exactement ×4 ces pixels fixes
+    const G = 4; // facteur d'échelle visuel pur
+    const ghw = 7*G;   // 28px — demi-largeur visuelle
+    const ghh = 10*G;  // 40px — demi-hauteur visuelle
+    const gd  = z.dir||1;
+
+    // ── JUMP: offset vertical by arc (in screen pixels) ──
+    const arcPx = z.jumpArc ? z.jumpArc * ZOOM : 0;
+    // y already = sy(z.y), so shift up by arcPx
+    const yd = y - arcPx; // draw at elevated position
+
+    // ── CHARGE WARNING: pulsing ground target circle ──
+    if(z.jumpPhase===1){
+      const chargeProgress = 1 - (z.jumpTimer/50);
+      const tx2=sx(z.jumpTargetX), ty2=sy(z.jumpTargetY);
+      ctx.save();
+      ctx.globalAlpha = 0.25 + chargeProgress*0.45;
+      ctx.strokeStyle='#ff4400';
+      ctx.lineWidth=3+chargeProgress*3;
+      const crossR=30+chargeProgress*20;
+      ctx.beginPath(); ctx.arc(tx2,ty2,crossR,0,Math.PI*2); ctx.stroke();
+      // Cross hairs
+      ctx.lineWidth=2;
+      ctx.beginPath(); ctx.moveTo(tx2-crossR-8,ty2); ctx.lineTo(tx2+crossR+8,ty2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(tx2,ty2-crossR-8); ctx.lineTo(tx2,ty2+crossR+8); ctx.stroke();
+      ctx.globalAlpha=1; ctx.restore();
+    }
+
+    // ── AIRBORNE: ground shadow below (at z.y) ──
+    if(z.jumpPhase===2 && arcPx>0){
+      ctx.save();
+      ctx.globalAlpha=0.35*(arcPx/(120*ZOOM));
+      ctx.fillStyle='rgba(0,0,0,0.6)';
+      ctx.beginPath(); ctx.ellipse(x, y+4, ghw*0.85*(1+arcPx/(120*ZOOM)*0.4), 5*G, 0,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha=1; ctx.restore();
+    }
+
+    const fl = z.hitFlash>0 && (z.hitFlash%4<2);
+    const gskin  = fl ? '#ff6666' : (z.skin||'#9e9e9e');
+    const gshirt = fl ? '#cc0000' : (z.shirt||'#c62828');
+    const gpants = z.pants||'#1565c0';
+    const gleg   = (z.animFrame===0 ? 3 : -3) * G;
+    const ghOff  = 2*G*gd;
+
+    // Shadow (on ground, not elevated)
+    if(z.jumpPhase!==2){
+      ctx.fillStyle='rgba(0,0,0,0.32)';
+      ctx.beginPath();ctx.ellipse(x, yd+ghh+2*G, ghw*0.9, 3*G, 0,0,Math.PI*2);ctx.fill();
+    }
+
+    // Jambes — haut des jambes = yd + hh*0.05*G
+    const glegTop = yd + Math.round(ghh*0.05);
+    const glegH   = ghh - Math.round(ghh*0.05) + 2*G;
+    ctx.fillStyle=gpants;
+    ctx.fillRect(x - 4*G, glegTop - gleg, 5*G, glegH);
+    ctx.fillRect(x + 1*G, glegTop + gleg, 5*G, glegH);
+    // Jean highlight
+    ctx.fillStyle='rgba(255,255,255,0.08)';
+    ctx.fillRect(x - 3*G, yd + Math.round(ghh*0.1), 2*G, Math.round(ghh*0.6));
+    // Chaussures
+    ctx.fillStyle='#111';
+    ctx.fillRect(x - 5*G, yd + ghh - gleg, 6*G, 3*G);
+    ctx.fillRect(x,        yd + ghh + gleg, 6*G, 3*G);
+
+    // Torse — descend de yd-ghh jusqu'à glegTop exactement
+    const gtorsoTop = yd - ghh;
+    const gtorsoH   = glegTop - gtorsoTop;
+    ctx.fillStyle=gshirt;
+    ctx.fillRect(x - ghw + ghOff, gtorsoTop, ghw*2, gtorsoH);
+    // Déchirures chemise
+    ctx.fillStyle='rgba(0,0,0,0.3)';
+    ctx.fillRect(x - ghw + ghOff + 2*G, gtorsoTop + 4*G, Math.round(3.5*G), 2*G);
+    ctx.fillRect(x - ghw + ghOff + 3*G, gtorsoTop + 8*G, 2*G, G);
+    // Bosse dorsale
+    const gbumpX = gd>0 ? x - ghw + ghOff - G : x + Math.round(ghw*0.5) + ghOff;
+    ctx.fillStyle=gshirt;
+    ctx.fillRect(gbumpX, gtorsoTop - 4*G, Math.round(7*G), Math.round(4.5*G));
+
+    // Cou
+    const gneckH = 4*G;
+    ctx.fillStyle=gskin;
+    ctx.fillRect(x - 2*G + ghOff, gtorsoTop - gneckH, 4*G, gneckH);
+
+    // Tête
+    const gheadW = Math.round(14*G * 1.2);
+    const gheadH = Math.round(14*G * 0.55);
+    const gheadX = x - Math.round(gheadW/2) + ghOff;
+    const gheadY = gtorsoTop - gneckH - gheadH - 2*G;
+    ctx.fillStyle=gskin;
+    ctx.fillRect(gheadX, gheadY, gheadW, gheadH);
+    // Cheveux
+    ctx.fillStyle='#2a2a2a';
+    ctx.fillRect(gheadX+G,           gheadY-3*G, 3*G, 4*G);
+    ctx.fillRect(gheadX+5*G,         gheadY-5*G, 3*G, 6*G);
+    ctx.fillRect(gheadX+gheadW-7*G,  gheadY-4*G, 3*G, 5*G);
+    ctx.fillRect(gheadX+gheadW-3*G,  gheadY-2*G, 2*G, 3*G);
+    // Boulons Frankenstein
+    ctx.fillStyle='#777';
+    ctx.fillRect(gheadX-3*G, gheadY+Math.round(gheadH*0.55), 4*G, 5*G);
+    ctx.fillRect(gheadX+gheadW-G, gheadY+Math.round(gheadH*0.55), 4*G, 5*G);
+    ctx.fillStyle='#aaa';
+    ctx.fillRect(gheadX-2*G, gheadY+Math.round(gheadH*0.55)+G, 2*G, 2*G);
+    ctx.fillRect(gheadX+gheadW, gheadY+Math.round(gheadH*0.55)+G, 2*G, 2*G);
+    // Cicatrice
+    ctx.fillStyle='rgba(0,0,0,0.55)';
+    ctx.fillRect(gheadX+3*G, gheadY+6*G, gheadW-6*G, G);
+    for(let si=0;si<3;si++) ctx.fillRect(gheadX+5*G+si*4*G, gheadY+4*G, G, 4*G);
+    // Oreille
+    const gearX = gd>0 ? gheadX+gheadW : gheadX-3*G;
+    ctx.fillStyle=gskin;
+    ctx.fillRect(gearX, gheadY+Math.round(gheadH*0.38), 3*G, 6*G);
+    // Yeux rouges
+    const geyeY  = gheadY + Math.round(gheadH*0.32);
+    const geyeSz = Math.max(4*G, Math.round(gheadW*0.22));
+    const geShift= gd>0?G:-G;
+    const geye1X = gheadX + 2*G + (gd>0?G:0);
+    const geye2X = gheadX + gheadW - geyeSz - 2*G + (gd>0?0:-G);
+    ctx.fillStyle='#111';
+    ctx.fillRect(geye1X-G, geyeY-G, geyeSz+2*G, geyeSz+2*G);
+    ctx.fillRect(geye2X-G, geyeY-G, geyeSz+2*G, geyeSz+2*G);
+    ctx.fillStyle='#fff';
+    ctx.fillRect(geye1X, geyeY, geyeSz, geyeSz);
+    ctx.fillRect(geye2X, geyeY, geyeSz, geyeSz);
+    ctx.fillStyle='#ff1744';
+    ctx.fillRect(geye1X+geShift, geyeY+G, geyeSz-2*G, geyeSz-2*G);
+    ctx.fillRect(geye2X+geShift, geyeY+G, geyeSz-2*G, geyeSz-2*G);
+    ctx.fillStyle='#000';
+    ctx.fillRect(geye1X+G+geShift, geyeY+2*G, Math.max(G,geyeSz-4*G), Math.max(G,geyeSz-4*G));
+    ctx.fillRect(geye2X+G+geShift, geyeY+2*G, Math.max(G,geyeSz-4*G), Math.max(G,geyeSz-4*G));
+    // Bouche
+    const gmouthY = gheadY + Math.round(gheadH*0.72);
+    ctx.fillStyle='#111';
+    ctx.fillRect(gheadX+3*G, gmouthY, gheadW-6*G, 4*G);
+    ctx.fillStyle='#eee';
+    ctx.fillRect(gheadX+4*G, gmouthY, 3*G, 2*G);
+    ctx.fillRect(gheadX+gheadW-7*G, gmouthY, 3*G, 2*G);
+
+    // Bras
+    const aThick = Math.max(3, Math.round(3*G));
+    const armLen = Math.round(14*G*0.65);
+    const handSz = Math.max(3, Math.round(3*G));
+    const asX    = gd>0 ? x+ghw+ghOff : x-ghw+ghOff;
+    const aBaseY = gtorsoTop + Math.round(gtorsoH*0.25);
+    const arm2Len= Math.round(armLen*0.65);
+    const a2Y    = aBaseY + aThick + 2*G;
+    const a2X    = gd>0 ? asX : asX-arm2Len;
+    ctx.fillStyle=gskin;
+    ctx.fillRect(a2X, a2Y, arm2Len, aThick);
+    ctx.fillRect(gd>0?a2X+arm2Len:a2X-handSz, a2Y, handSz, handSz+G);
+    ctx.fillRect(gd>0?asX:asX-armLen, aBaseY, armLen, aThick);
+    ctx.fillRect(gd>0?asX+armLen:asX-armLen-handSz, aBaseY, handSz, handSz+G);
+
+    // Barre de vie
+    const ghpW = gheadW + 20*G, ghpH = 4*G;
+    const ghpX = x - Math.round(ghpW/2), ghpY = gheadY - 10*G;
+    ctx.fillStyle='#333'; ctx.fillRect(ghpX, ghpY, ghpW, ghpH);
+    ctx.fillStyle = z.hp>=z.maxHp?'#66bb6a':(z.hp>4?'#ef5350':'#ff1744');
+    ctx.fillRect(ghpX, ghpY, Math.round(ghpW*(z.hp/z.maxHp)), ghpH);
+    ctx.strokeStyle='#000'; ctx.lineWidth=1; ctx.strokeRect(ghpX,ghpY,ghpW,ghpH);
+
+    // Label
+    ctx.fillStyle = fl?'#ff4444':(z.jumpPhase===2?'#ff8800':'#ff6600');
+    ctx.font = 'bold 13px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText(z.jumpPhase===1?'⚠️ GÉANT':z.jumpPhase===2?'💥 GÉANT':'👊 GÉANT', x, ghpY-4);
+
+    return;
+  }
 
   // ── EMERGING ANIMATION — 3 phases over 180 frames ──
   // Phase 1 (0-60f):   Ground cracks, hand shoots up with fingers open, then lowers back
@@ -3478,9 +5725,17 @@ function drawZombie(z){
   }
 
   if(z.dead){
+    // Giant has its own death animation (giantDeathExplosion) — skip the red rectangle
+    if(z.id==='giant') return;
+    const deathScale = 1;
     if(!z.flyingCorpse){
       ctx.globalAlpha=Math.max(0,z.deadAnim/38);
-      ctx.fillStyle=C.blood; ctx.fillRect(x-hw,y-hh,z.w,z.h);
+      ctx.fillStyle=C.blood;
+      ctx.save();
+      ctx.translate(x,y);
+      ctx.translate(-x,-y);
+      ctx.fillRect(x-hw,y-hh,z.w,z.h);
+      ctx.restore();
       ctx.globalAlpha=1;
     } else {
       // Flying corpse: tumbling body with blood
@@ -3491,6 +5746,7 @@ function drawZombie(z){
       // Rotate based on knock velocity direction
       const angle=Math.atan2(z.knockY,z.knockX)+(1-t)*Math.PI*3;
       ctx.rotate(angle);
+      ctx.scale(deathScale,deathScale);
       ctx.fillStyle=z.body||'#4caf50';
       ctx.fillRect(-hw,-hh,z.w,z.h);
       ctx.fillStyle=C.blood;
@@ -3658,16 +5914,68 @@ function drawZombie(z){
 
 function drawParticles(){
   // Draw puddles first (bottom layer), then blood, then chunks on top
-  const order=['puddle','blood','star','chunk','dirt',null];
+  const order=['puddle','blood','star','chunk','dirt','giantHead',null];
   for(const t of order){
     for(const p of particles){
       if((t===null?(!p.type||p.text):(p.type!==t))) continue;
       const px2=Math.round(sx(p.x)), py2=Math.round(sy(p.y));
       if(px2<-20||px2>VW+20||py2<-20||py2>VH+20) continue;
+
+      // ── Giant head rendering ──
+      if(p.type==='giantHead'){
+        if(p.exploded) continue;
+        const alpha = Math.min(1, p.life/p.maxLife * 3);
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, alpha);
+        ctx.translate(px2, py2);
+        ctx.rotate(p.rot||0);
+        const G=4, gd=p.dir||1;
+        const gheadW=Math.round(14*G*1.2), gheadH=Math.round(14*G*0.55);
+        const hx=-gheadW/2, hy=-gheadH/2;
+        // Head body
+        ctx.fillStyle=p.skin||'#9e9e9e';
+        ctx.fillRect(hx,hy,gheadW,gheadH);
+        // Hair
+        ctx.fillStyle='#2a2a2a';
+        ctx.fillRect(hx+G,hy-3*G,3*G,4*G);
+        ctx.fillRect(hx+5*G,hy-5*G,3*G,6*G);
+        ctx.fillRect(hx+gheadW-7*G,hy-4*G,3*G,5*G);
+        // Bolts
+        ctx.fillStyle='#777';
+        ctx.fillRect(hx-3*G,hy+Math.round(gheadH*0.55),4*G,5*G);
+        ctx.fillRect(hx+gheadW-G,hy+Math.round(gheadH*0.55),4*G,5*G);
+        // Eyes (red, dead X)
+        ctx.fillStyle='#ff1744';
+        const eyeSz=Math.max(4*G,Math.round(gheadW*0.22));
+        ctx.fillRect(hx+2*G,hy+Math.round(gheadH*0.32),eyeSz,eyeSz);
+        ctx.fillRect(hx+gheadW-eyeSz-2*G,hy+Math.round(gheadH*0.32),eyeSz,eyeSz);
+        ctx.fillStyle='#000';
+        // X marks over eyes
+        ctx.lineWidth=3*G/4; ctx.strokeStyle='#000';
+        const e1x=px2+(hx+2*G+eyeSz/2-gheadW/2); // not used in rotated ctx
+        // Draw X in rotated ctx
+        ctx.beginPath();
+        ctx.moveTo(hx+2*G,hy+Math.round(gheadH*0.32));
+        ctx.lineTo(hx+2*G+eyeSz,hy+Math.round(gheadH*0.32)+eyeSz);
+        ctx.moveTo(hx+2*G+eyeSz,hy+Math.round(gheadH*0.32));
+        ctx.lineTo(hx+2*G,hy+Math.round(gheadH*0.32)+eyeSz);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(hx+gheadW-eyeSz-2*G,hy+Math.round(gheadH*0.32));
+        ctx.lineTo(hx+gheadW-2*G,hy+Math.round(gheadH*0.32)+eyeSz);
+        ctx.moveTo(hx+gheadW-2*G,hy+Math.round(gheadH*0.32));
+        ctx.lineTo(hx+gheadW-eyeSz-2*G,hy+Math.round(gheadH*0.32)+eyeSz);
+        ctx.stroke();
+        // Mouth open (dead)
+        ctx.fillStyle='#111';
+        ctx.fillRect(hx+3*G,hy+Math.round(gheadH*0.72),gheadW-6*G,6*G);
+        ctx.restore();
+        continue;
+      }
       // Solid 3s (180f), fade 8s (480f) — total 660f
       const fadeStart=480;
       let alpha;
-      if(p.type==='puddle'||(p.type==='chunk'&&p.landed)){
+      if(p.type==='puddle'||(p.type==='chunk'&&p.landed)||(p.type==='iceChunk'&&p.landed)){
         alpha = p.life > fadeStart ? 0.88 : (p.life/fadeStart)*0.88;
       } else {
         alpha = p.life/p.maxLife;
@@ -3685,6 +5993,9 @@ function drawParticles(){
         ctx.fillStyle=p.color;
         ctx.fillRect(-p.sz/2,-p.sz/2,p.sz,p.sz);
         ctx.restore();
+      } else if(p.type==='iceChunk'){
+        // Frozen body chunks — use the ice draw function
+        drawIceChunkParticle(p,px2,py2);
       } else if(p.type==='puddle'){
         // Puddles are ellipses on the ground
         ctx.fillStyle=p.color;
@@ -3698,6 +6009,28 @@ function drawParticles(){
       ctx.globalAlpha=1;
     }
   }
+}
+
+// ── Helper : pixel-art shotgun centré sur (cx,cy), scale s ──
+function drawPixelShotgun(cx, cy, s){
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(s, s);
+  const gc='#cfd8dc', sc='#6d4c41', dc='#455a64';
+  ctx.fillStyle=sc;
+  ctx.fillRect(-11,-1,6,4);
+  ctx.fillRect(-11,2,4,3);
+  ctx.fillStyle=dc;
+  ctx.fillRect(-5,-2,7,5);
+  ctx.fillStyle='#ff7043';
+  ctx.fillRect(-1,1,5,3);
+  ctx.fillStyle=gc;
+  ctx.fillRect(2,-1,10,3);
+  ctx.fillStyle='#eceff1';
+  ctx.fillRect(11,-1,2,3);
+  ctx.fillStyle=dc;
+  ctx.fillRect(-2,3,2,3);
+  ctx.restore();
 }
 
 // ── Draw powerup squares ──
@@ -3729,32 +6062,7 @@ function drawPowerups(){
     ctx.font='16px Courier New'; ctx.textAlign='center';
     ctx.globalAlpha=1;
     if(pu.def.icon==='GUN'){
-      // Draw pixel-art shotgun inside the square
-      ctx.save();
-      ctx.translate(px2, py2);
-      const gc='#cfd8dc'; // barrel grey
-      const sc='#6d4c41'; // stock brown
-      const dc='#455a64'; // dark receiver
-      // Stock (left side, angled slightly)
-      ctx.fillStyle=sc;
-      ctx.fillRect(-11, -1, 6, 4);   // stock body
-      ctx.fillRect(-11, 2, 4, 3);    // stock butt
-      // Receiver (centre)
-      ctx.fillStyle=dc;
-      ctx.fillRect(-5, -2, 7, 5);
-      // Pump guard
-      ctx.fillStyle='#ff7043';
-      ctx.fillRect(-1, 1, 5, 3);
-      // Barrel (right side, long)
-      ctx.fillStyle=gc;
-      ctx.fillRect(2, -1, 10, 3);
-      // Muzzle tip (bright)
-      ctx.fillStyle='#eceff1';
-      ctx.fillRect(11, -1, 2, 3);
-      // Trigger guard (small arc)
-      ctx.fillStyle=dc;
-      ctx.fillRect(-2, 3, 2, 3);
-      ctx.restore();
+      drawPixelShotgun(px2, py2, 1);
     } else {
       ctx.fillText(pu.def.icon, px2, py2+6);
     }
@@ -3870,23 +6178,77 @@ function _drawBoltPath(ctx,x1,y1,x2,y2,segs,jag){
 function drawActiveFX(){
   const fxList=[];
   if(fx.fireBall.active)   fxList.push({icon:'🔥',color:'#ff6d00',timer:fx.fireBall.timer,max:fx.fireBall.max});
+  if(fx.iceBall.active)    fxList.push({icon:'🧊',color:'#00cfff',timer:fx.iceBall.timer,max:fx.iceBall.max});
   if(ricochetCount>0)      fxList.push({icon:'↩️',color:'#00e5ff',timer:ricochetTimer,max:1800,extra:'×'+ricochetCount});
-  if(extraBalls.length>0)  fxList.push({icon:'⚽',color:'#e8ff00',timer:-1,max:1,extra:extraBalls.length+1+' balls',permanent:true});
+  if(extraBalls.length>0)  {} // +1 ball powerup: permanent, no gauge shown
   if(orbitBalls.length>0)  fxList.push({icon:'⚽',color:'#ffe066',timer:orbitBallsTimer,max:1200,extra:'×6 ORBIT'});
   if(fx.thunder.active)    fxList.push({icon:'⚡',color:'#1565c0',timer:fx.thunder.timer,max:fx.thunder.max});
   if(fx.slowMo.active)     fxList.push({icon:'🐌',color:'#e040fb',timer:fx.slowMo.timer,max:fx.slowMo.max});
   if(fx.shotgun.active)    fxList.push({icon:'💥',color:'#ff5722',timer:fx.shotgun.timer,max:fx.shotgun.max,extra:fx.shotgun.reloading>0?'RELOAD':('×'+fx.shotgun.shots)});
   if(samurai.active)       fxList.push({icon:'⚔️',color:'#c0c0c0',timer:samurai.timer,max:samurai.max});
-  if(!fxList.length) return;
+  if(megaDash.active)      fxList.push({icon:'⚡',color:'#00eeff',timer:megaDash.timer,max:megaDash.max,extra:'MEGA'});
+
   const barW=140, barH=16, gap=5;
   const startX=10, startY=VH-52-fxList.length*(barH+gap);
+
+  // ── Notification power-up ramassé ──
+  if(puNotif.timer > 0){
+    puNotif.timer--;
+    const t = puNotif.timer / puNotif.maxTimer; // 1→0
+    // Apparition rapide, disparition douce
+    const alpha = t > 0.85 ? (1-t)/0.15 : t < 0.18 ? t/0.18 : 1;
+    // Position : juste au-dessus des barres FX
+    const notifH = 52;
+    const notifW = 200;
+    const notifX = startX;
+    const notifY = startY - notifH - 8;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    // Rectangle jaune principal
+    ctx.fillStyle = '#e8ff00';
+    ctx.shadowColor = puNotif.color;
+    ctx.shadowBlur = 18;
+    ctx.fillRect(notifX, notifY, notifW, notifH);
+
+    // Bordure colorée en fonction du power-up
+    ctx.strokeStyle = puNotif.color;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(notifX, notifY, notifW, notifH);
+    ctx.shadowBlur = 0;
+
+    // Icône (grande, à gauche)
+    ctx.fillStyle = '#000';
+    if(puNotif.icon === 'GUN'){
+      drawPixelShotgun(notifX + 26, notifY + 26, 1.7);
+    } else {
+      ctx.font = 'bold 28px Courier New';
+      ctx.textAlign = 'left';
+      ctx.fillText(puNotif.icon, notifX + 8, notifY + 35);
+    }
+
+    // Nom du power-up (grand, gras, noir)
+    ctx.font = 'bold 20px Courier New';
+    ctx.fillStyle = '#000';
+    ctx.textAlign = 'left';
+    ctx.fillText(puNotif.label, notifX + 46, notifY + 20);
+
+    // Sous-texte "POWER UP!"
+    ctx.font = 'bold 11px Courier New';
+    ctx.fillStyle = '#333';
+    ctx.fillText('POWER UP !', notifX + 46, notifY + 38);
+
+    ctx.restore();
+  }
+
+  if(!fxList.length) return;
   fxList.forEach((f,i)=>{
     const fy=startY+i*(barH+gap);
     ctx.fillStyle='rgba(0,0,0,0.75)'; ctx.fillRect(startX,fy,barW+32,barH);
     ctx.font='12px Courier New'; ctx.textAlign='left';
     ctx.fillText(f.icon, startX+2, fy+13);
     if(f.permanent){
-      // Permanent effect: show solid colored bar + label
       ctx.fillStyle=f.color; ctx.fillRect(startX+20,fy+3,barW,10);
       ctx.fillStyle='rgba(255,255,255,0.15)'; ctx.fillRect(startX+20,fy+3,barW,5);
     } else {
@@ -3993,9 +6355,17 @@ function drawBall2(){
     }
     // Ball itself — identical design to main ball
     ctx.save();ctx.translate(bx,by);ctx.rotate(eb.spin);
-    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(0,0,eb.r,0,Math.PI*2);ctx.fill();
-    ctx.fillStyle='#1a1a1a';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
-    [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='#333';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+    if(fx.iceBall.active){
+      ctx.shadowColor='#aaeeff'; ctx.shadowBlur=14;
+      ctx.fillStyle='#ddf6ff';ctx.beginPath();ctx.arc(0,0,eb.r,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='rgba(100,200,255,0.7)';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
+      [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='rgba(150,220,255,0.9)';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+      ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fillRect(-1,-eb.r+2,2,3); ctx.fillRect(-eb.r+2,-1,3,2);
+    } else {
+      ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(0,0,eb.r,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#1a1a1a';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
+      [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='#333';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+    }
     ctx.restore();
     // Fire aura on extra ball if fireball active
     if(fx.fireBall.active){
@@ -4239,6 +6609,24 @@ function drawMinimap(){
   // Player
   const ppx=mmX+(player.x/WORLD.w)*mmW, ppy=mmY+(player.y/WORLD.h)*mmH;
   ctx.fillStyle='#e8ff00'; ctx.fillRect(ppx-4,ppy-4,8,8);
+  // ── Serpent Boss sur la minimap ──
+  if(snake.active && !snake.dead && snake.alpha>0){
+    const head=snake.segs[0];
+    const smx=mmX+(head.x/WORLD.w)*mmW, smy=mmY+(head.y/WORLD.h)*mmH;
+    // Corps : petits points oranges
+    for(let i=1;i<snake.segs.length;i+=2){
+      const seg=snake.segs[i];
+      const sbx=mmX+(seg.x/WORLD.w)*mmW, sby=mmY+(seg.y/WORLD.h)*mmH;
+      ctx.fillStyle='rgba(255,120,0,0.7)';
+      ctx.fillRect(sbx-1,sby-1,2,2);
+    }
+    // Tête : carré rouge pulsant
+    const pulse=0.7+0.3*Math.sin(frameCount*0.18);
+    ctx.fillStyle=`rgba(255,30,0,${pulse})`;
+    ctx.fillRect(smx-4,smy-4,8,8);
+    ctx.strokeStyle='#ff6600'; ctx.lineWidth=1;
+    ctx.strokeRect(smx-4,smy-4,8,8);
+  }
   // Camera rect
   ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.lineWidth=1;
   ctx.strokeRect(mmX+(cam.x/WORLD.w)*mmW,mmY+(cam.y/WORLD.h)*mmH,(VW/WORLD.w)*mmW,(VH/WORLD.h)*mmH);
@@ -4287,46 +6675,169 @@ function drawUI(){
     ctx.shadowBlur=0; ctx.restore();
   }
 
-  // ── KILLS BY TYPE + SCORE — top left, décalé vers le bas pour laisser de l'espace sous la barre ──
-  const killRows=[
-    {id:'normal', icon:'🧟', label:'NORMAL', color:'#c0c0c0'},
-    {id:'big',    icon:'💀', label:'BIG',    color:'#ef9a9a'},
-    {id:'tank',   icon:'☠️', label:'TANK',   color:'#ce93d8'},
-    {id:'fast',   icon:'⚡', label:'FAST',   color:'#ccff00'},
-  ];
-  const rowH=42, panelStartY=52; // rowH augmenté pour espacer les lignes
+  // ── KILLS HUD — pixel-art zombie icons ──
+  // Tous les non-géants comptabilisés comme "normal"
+  const normalKills = killsByType.normal + killsByType.big + killsByType.tank + killsByType.fast;
 
-  killRows.forEach((row,i)=>{
-    const ry=panelStartY+i*rowH;
-    ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=6;
-    ctx.font='18px Courier New'; ctx.textAlign='left';
-    ctx.fillText(row.icon, panelX+2, ry+18);
-    ctx.fillStyle=row.color; ctx.font=F;
-    ctx.fillText(row.label, panelX+26, ry+10);
-    ctx.fillStyle='#ffffff'; ctx.font=FB;
-    ctx.fillText(killsByType[row.id]||0, panelX+26, ry+28);
-    ctx.shadowBlur=0;
-  });
+  // Helper: draw drop shadow text
+  function hudText(txt, x2, y2, font2, col2){
+    ctx.save();
+    ctx.font = font2;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    ctx.fillText(txt, x2+1, y2+1);
+    ctx.fillStyle = col2;
+    ctx.fillText(txt, x2, y2);
+    ctx.restore();
+  }
+
+  // ── Pixel-art zombie icon drawers — TÊTE SEULEMENT ──
+
+  // Tête zombie normal — peau grise, yeux rouges, boulons Frankenstein
+  function drawNormalZombieIcon(cx, cy){
+    const p = (x2,y2,w2,h2,c2)=>{ ctx.fillStyle=c2; ctx.fillRect(cx+x2,cy+y2,w2,h2); };
+    // Tête
+    p(-7,-14,14,12,'#9e9e9e');
+    // Cheveux
+    p(-7,-16,14,3,'#2a2a2a');
+    p(-7,-17,4,2,'#2a2a2a');
+    p(3,-17,4,2,'#2a2a2a');
+    // Yeux rouges
+    p(-5,-10,4,4,'#111');
+    p(1,-10,4,4,'#111');
+    p(-4,-9,3,3,'#ff1744');
+    p(2,-9,3,3,'#ff1744');
+    // Bouche
+    p(-4,-4,8,2,'#111');
+    p(-3,-4,2,2,'#eee');
+    p(1,-4,2,2,'#eee');
+    // Boulons Frankenstein
+    p(-10,-8,3,5,'#777');
+    p(7,-8,3,5,'#777');
+    p(-9,-7,2,2,'#aaa');
+    p(8,-7,2,2,'#aaa');
+    // Cicatrice
+    p(-3,-7,6,1,'rgba(0,0,0,0.5)');
+  }
+
+  // Tête zombie géant — même design mais +50% plus grande
+  function drawGiantZombieIcon(cx, cy){
+    const p = (x2,y2,w2,h2,c2)=>{ ctx.fillStyle=c2; ctx.fillRect(cx+x2,cy+y2,w2,h2); };
+    // Tête (plus large)
+    p(-9,-16,18,14,'#9e9e9e');
+    // Cheveux
+    p(-9,-19,18,4,'#2a2a2a');
+    p(-9,-20,5,2,'#2a2a2a');
+    p(4,-20,5,2,'#2a2a2a');
+    // Yeux rouges (plus grands)
+    p(-7,-13,5,5,'#111');
+    p(2,-13,5,5,'#111');
+    p(-6,-12,4,4,'#ff1744');
+    p(3,-12,4,4,'#ff1744');
+    // Pupilles
+    p(-5,-11,2,2,'#000');
+    p(4,-11,2,2,'#000');
+    // Bouche
+    p(-5,-4,10,3,'#111');
+    p(-4,-4,3,2,'#eee');
+    p(1,-4,3,2,'#eee');
+    // Boulons Frankenstein (plus gros)
+    p(-12,-9,4,7,'#777');
+    p(8,-9,4,7,'#777');
+    p(-11,-8,2,3,'#aaa');
+    p(9,-8,2,3,'#aaa');
+    // Cicatrice
+    p(-4,-8,8,1,'rgba(0,0,0,0.5)');
+    p(-2,-10,1,4,'rgba(0,0,0,0.4)');
+    p(1,-10,1,4,'rgba(0,0,0,0.4)');
+    // Barre de vie verte au-dessus
+    p(-9,-21,18,2,'#66bb6a');
+  }
+
+  // drawBossIcon(cx, cy): tête de mort pixel-art — centrée sur (cx, cy)
+  function drawBossIcon(cx, cy){
+    const p = (x2,y2,w2,h2,c2)=>{ ctx.fillStyle=c2; ctx.fillRect(cx+x2,cy+y2,w2,h2); };
+    const bone = '#e0e0e0';
+    const dark  = '#222';
+    p(-6,-16,12,2,bone);
+    p(-8,-14,16,2,bone);
+    p(-9,-12,18,10,bone);
+    p(-8,-2,16,4,bone);
+    p(-9,-12,2,14,'rgba(0,0,0,0.25)');
+    p(7,-12,2,14,'rgba(0,0,0,0.25)');
+    p(-7,-11,5,5,dark);
+    p(2,-11,5,5,dark);
+    p(-6,-10,2,2,'rgba(255,20,68,0.7)');
+    p(3,-10,2,2,'rgba(255,20,68,0.7)');
+    p(-1,-7,2,2,dark);
+    p(-2,-6,4,1,dark);
+    p(-7,-2,3,4,'#f5f5f5');
+    p(-3,-2,3,4,'#f5f5f5');
+    p(1,-2,3,4,'#f5f5f5');
+    p(5,-2,3,4,'#f5f5f5');
+    p(-4,-2,1,4,dark);
+    p(0,-2,1,4,dark);
+    p(4,-2,1,4,dark);
+    p(1,-15,1,1,'rgba(0,0,0,0.3)');
+    p(0,-14,1,2,'rgba(0,0,0,0.3)');
+    p(1,-12,1,2,'rgba(0,0,0,0.3)');
+  }
+
+  const rowH=40, panelStartY=52;
+  // Layout constants — tout aligné sur la même grille
+  const iconCX   = panelX + 13;  // centre X de toutes les icônes
+  const textX    = panelX + 30;  // X du label et du score
+  const iconCYoff= 18;           // offset cy dans la row
+  const labelYoff= 12;           // offset Y du label
+  const scoreYoff= 28;           // offset Y du score
+  const FLABEL   = 'bold 13px Courier New';  // taille uniforme label
+  const FSCORE   = 'bold 16px Courier New';  // taille uniforme score
+
+  // Row 1: NORMAL
+  {
+    const ry = panelStartY;
+    ctx.save(); ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=5;
+    drawNormalZombieIcon(iconCX, ry + iconCYoff);
+    ctx.restore();
+    hudText('NORMAL', textX, ry + labelYoff, FLABEL, '#c0c0c0');
+    hudText(normalKills, textX, ry + scoreYoff, FSCORE, '#ffffff');
+  }
+
+  // Row 2: GÉANT
+  {
+    const ry = panelStartY + rowH;
+    ctx.save(); ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=5;
+    drawGiantZombieIcon(iconCX, ry + iconCYoff);
+    ctx.restore();
+    hudText('GÉANT', textX, ry + labelYoff, FLABEL, '#ff8a65');
+    hudText(killsByType.giant||0, textX, ry + scoreYoff, FSCORE, '#ffffff');
+  }
+
+  // Row 3: BOSS
+  {
+    const ry = panelStartY + rowH*2;
+    ctx.save(); ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=5;
+    drawBossIcon(iconCX, ry + iconCYoff);
+    ctx.restore();
+    hudText('BOSS', textX, ry + labelYoff, FLABEL, '#ffeb3b');
+    hudText(bossKills||0, textX, ry + scoreYoff, FSCORE, '#ffffff');
+  }
 
   // ── WAVE + ALIVE — juste sous les kills ──
-  const infoY = panelStartY + killRows.length*rowH + 6;
+  const infoY = panelStartY + rowH*3 + 4;
 
   // WAVE
-  ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=6;
-  ctx.fillStyle='#ffffff'; ctx.font=F; ctx.textAlign='left';
-  ctx.fillText('WAVE', panelX+4, infoY+14);
-  ctx.fillStyle='#ff4444'; ctx.font='bold 22px Courier New';
-  ctx.fillText(wave, panelX+4, infoY+34);
-  ctx.shadowBlur=0;
+  ctx.save(); ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=6;
+  hudText('WAVE', panelX+4, infoY+14, FLABEL, '#aaaaaa');
+  hudText(wave,   panelX+4, infoY+30, FSCORE, '#ff4444');
+  ctx.restore();
 
   // ALIVE
   const alive=zombies.filter(z=>!z.dead&&z.emerging===0).length;
-  ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=6;
-  ctx.fillStyle='#ffffff'; ctx.font=F; ctx.textAlign='left';
-  ctx.fillText('🧟 ALIVE', panelX+4, infoY+54);
-  ctx.fillStyle='#ff6666'; ctx.font='bold 22px Courier New';
-  ctx.fillText(alive, panelX+4, infoY+74);
-  ctx.shadowBlur=0;
+  ctx.save(); ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=6;
+  hudText('ALIVE', panelX+4, infoY+48, FLABEL, '#aaaaaa');
+  hudText(alive,   panelX+4, infoY+64, FSCORE, '#ff6666');
+  ctx.restore();
 
   // ── SCORE — bas gauche ──
   ctx.shadowColor='rgba(0,0,0,0.95)'; ctx.shadowBlur=8;
@@ -4336,6 +6847,26 @@ function drawUI(){
   ctx.fillText(score, panelX+4, VH-18);
   ctx.shadowBlur=0;
 
+  // ── BALL COUNT — juste au-dessus du score ──
+  {
+    const totalBalls = 1 + extraBalls.length; // ballon principal + extra balls
+    const ballsAtFeet = (ball.active ? 0 : 1) + extraBalls.filter(eb => !eb.active).length;
+    const bx = panelX + 4;
+    const by = VH - 80;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 8;
+    // Icône ⚽ grande
+    ctx.font = 'bold 28px Courier New';
+    ctx.fillStyle = '#e8ff00';
+    ctx.textAlign = 'left';
+    ctx.fillText('⚽', bx, by);
+    // Chiffre de balles disponibles / total
+    ctx.font = 'bold 26px Courier New';
+    ctx.fillStyle = ballsAtFeet > 0 ? '#ffffff' : '#666666';
+    ctx.fillText(ballsAtFeet + '/' + totalBalls, bx + 34, by);
+    ctx.restore();
+  }
+
   // ── MEGA DASH active overlay ──
   if(megaDash.active){
     const prog=megaDash.timer/megaDash.max;
@@ -4344,17 +6875,7 @@ function drawUI(){
     gd.addColorStop(0,'rgba(0,180,255,0)');
     gd.addColorStop(1,`rgba(0,60,180,${0.22*prog})`);
     ctx.fillStyle=gd; ctx.fillRect(0,0,VW,VH);
-    // Timer bar at top center
-    const bw=180, bh=8, bx3=VW/2-bw/2, by3=20;
-    ctx.fillStyle='rgba(0,0,0,0.65)'; ctx.fillRect(bx3-2,by3-2,bw+4,bh+4);
-    ctx.fillStyle='#003344'; ctx.fillRect(bx3,by3,bw,bh);
-    const gc=ctx.createLinearGradient(bx3,0,bx3+bw*prog,0);
-    gc.addColorStop(0,'#00eeff'); gc.addColorStop(1,'#0066ff');
-    ctx.fillStyle=gc; ctx.fillRect(bx3,by3,bw*prog,bh);
-    ctx.shadowColor='#00eeff'; ctx.shadowBlur=10;
-    ctx.fillStyle='#00eeff'; ctx.font='bold 11px Courier New'; ctx.textAlign='center';
-    ctx.fillText('⚡ MEGA DASH ⚡', VW/2, by3+bh+12);
-    ctx.shadowBlur=0;
+
   }
 
   // ── MINIMAP — top right ──
@@ -4377,26 +6898,69 @@ function drawUI(){
 
   // ── WAVE ANNOUNCE — above player ──
   if(waveAnnounce>0){
-    const alpha=waveAnnounce<40?waveAnnounce/40:1;
-    ctx.globalAlpha=alpha;
     const isPurgeWave=wave%5===0;
     const plsx=Math.round(sx(player.x));
     const plsy=Math.round(sy(player.y));
-    const annY=Math.max(80, plsy-70);
-    ctx.fillStyle=isPurgeWave?'rgba(200,40,0,0.85)':'rgba(0,0,0,0.78)';
-    const annW=250, annH=isPurgeWave?54:40;
-    ctx.fillRect(plsx-annW/2, annY-annH, annW, annH);
+    const annW=250, annH=isPurgeWave?54:44;
+    const annTop=Math.max(14, plsy-70-annH);
+    const skew=8;
+
+    // ── Animation : slide de droite→centre, puis centre→gauche ──
+    const TOTAL=160, ENTER=20, EXIT=40;
+    // easeOut cubic
+    const easeOut = t => 1-(1-t)*(1-t)*(1-t);
+    const easeIn  = t => t*t*t;
+    let offsetX=0, alpha=1;
+    if(waveAnnounce > TOTAL-ENTER){
+      // Entrée : droite → centre
+      const p = 1-(waveAnnounce-(TOTAL-ENTER))/ENTER; // 0→1
+      offsetX = (VW * 0.7) * (1-easeOut(p));
+      alpha = p;
+    } else if(waveAnnounce < EXIT){
+      // Sortie : centre → gauche
+      const p = waveAnnounce/EXIT; // 1→0
+      offsetX = -(VW * 0.7) * (1-easeIn(p));
+      alpha = p;
+    }
+
+    ctx.save();
+    ctx.globalAlpha=alpha;
+    ctx.translate(offsetX, 0);
+
+    const annX=plsx-annW/2;
+    const bgColor=isPurgeWave?'rgba(200,40,0,0.92)':'rgba(0,0,0,0.88)';
+    ctx.fillStyle=bgColor;
+    ctx.beginPath();
+    ctx.moveTo(annX+skew, annTop);
+    ctx.lineTo(annX+annW, annTop);
+    ctx.lineTo(annX+annW-skew, annTop+annH);
+    ctx.lineTo(annX, annTop+annH);
+    ctx.closePath();
+    ctx.fill();
+
+    if(isPurgeWave){
+      ctx.strokeStyle='#ff4444';
+      ctx.lineWidth=2;
+      ctx.beginPath();
+      ctx.moveTo(annX+skew, annTop);
+      ctx.lineTo(annX+annW, annTop);
+      ctx.lineTo(annX+annW-skew, annTop+annH);
+      ctx.lineTo(annX, annTop+annH);
+      ctx.closePath();
+      ctx.stroke();
+    }
+
     ctx.fillStyle=isPurgeWave?'#ff4444':'#e8ff00';
     ctx.font='bold 22px Courier New'; ctx.textAlign='center';
-    ctx.fillText('WAVE '+wave+(isPurgeWave?' — PURGE!':'!'), plsx, annY-annH+22);
+    ctx.fillText('WAVE '+wave+(isPurgeWave?' — PURGE!':'!'), plsx, annTop+22);
     if(isPurgeWave){
       ctx.fillStyle='#ffeb3b'; ctx.font='bold 12px Courier New';
-      ctx.fillText('⚡ ALL ZOMBIES ANNIHILATED ⚡', plsx, annY-annH+40);
+      ctx.fillText('⚡ ALL ZOMBIES ANNIHILATED ⚡', plsx, annTop+42);
     } else {
       ctx.fillStyle='#ff8888'; ctx.font='12px Courier New';
-      ctx.fillText('HORDE: '+targetCount, plsx, annY-annH+36);
+      ctx.fillText('HORDE: '+targetCount, plsx, annTop+38);
     }
-    ctx.globalAlpha=1;
+    ctx.restore();
   }
 }
 
@@ -4442,43 +7006,286 @@ function drawPauseButton(){
   }
 }
 
-function drawPauseScreen(){
-  ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.fillRect(0,0,VW,VH);
-  ctx.fillStyle='#e8ff00'; ctx.font='bold 28px Courier New'; ctx.textAlign='center';
-  ctx.fillText('PAUSE',VW/2,VH/2-10);
-  ctx.fillStyle='#ffffff'; ctx.font='18px Courier New';
-  ctx.fillText('tap ▶ to resume',VW/2,VH/2+16);
+function drawPauseScreen(anim){
+  // anim: 0=hidden → 1=fully visible (used for both open & close)
+  if(anim === undefined) anim = 1;
 
-  // ── INVINCIBLE MODE checkbox ──
-  const cbSize = 22;
-  const cbX = VW/2 - 90;
-  const cbY = VH/2 + 48;
-  // Box
-  ctx.strokeStyle = invincibleMode ? '#00eeff' : '#888';
-  ctx.lineWidth = 2.5;
-  ctx.fillStyle = invincibleMode ? 'rgba(0,200,255,0.18)' : 'rgba(255,255,255,0.05)';
-  ctx.beginPath();
-  ctx.roundRect(cbX, cbY, cbSize, cbSize, 4);
-  ctx.fill(); ctx.stroke();
-  // Checkmark
-  if(invincibleMode){
-    ctx.strokeStyle='#00eeff'; ctx.lineWidth=3; ctx.lineCap='round'; ctx.lineJoin='round';
-    ctx.beginPath();
-    ctx.moveTo(cbX+4, cbY+11); ctx.lineTo(cbX+9, cbY+17); ctx.lineTo(cbX+18, cbY+5);
-    ctx.stroke();
-    ctx.lineCap='butt';
+  // Easing helpers
+  const easeOut = t => 1 - Math.pow(1-t, 3);
+  const easeIn  = t => t * t * t;
+  const easeOutBack = t => { const c = 1.70158; return 1 + (c+1)*Math.pow(t-1,3) + c*Math.pow(t-1,2); };
+
+  // Per-element stagger: element i starts at delay*i, spans (1-delay*i) of anim range
+  // delays: title=0, home=0.08, playBtn=0.16, cb1=0.24, cb2=0.32
+  function elemT(delay, span){
+    const raw = (anim - delay) / span;
+    return Math.max(0, Math.min(1, raw));
   }
-  // Label
-  ctx.fillStyle = invincibleMode ? '#00eeff' : '#aaaaaa';
-  ctx.font = invincibleMode ? 'bold 15px Courier New' : '15px Courier New';
-  ctx.textAlign = 'left';
-  ctx.fillText('INVINCIBLE MODE', cbX + cbSize + 10, cbY + 16);
-  ctx.textAlign = 'center';
+
+  // ── Background overlay — fades in first ──
+  const bgA = easeOut(elemT(0, 0.6)) * 0.72;
+  ctx.fillStyle = `rgba(0,0,0,${bgA})`;
+  ctx.fillRect(0, 0, VW, VH);
+
+  if(bgA < 0.01) return; // nothing visible yet
+
+  // ── Helper: draw element with clip + alpha ──
+  function withAnim(delay, span, ease, fn){
+    const t = ease(elemT(delay, span));
+    if(t <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = t;
+    fn(t);
+    ctx.restore();
+  }
+
+  // ── PAUSE title — slides down from top ──
+  withAnim(0, 0.55, easeOutBack, t => {
+    const offY = (1-t) * -60;
+    ctx.fillStyle = '#e8ff00';
+    ctx.font = 'bold 32px Courier New';
+    ctx.textAlign = 'center';
+    // Glow
+    ctx.shadowColor = '#e8ff00';
+    ctx.shadowBlur = 18 * t;
+    ctx.fillText('PAUSE', VW/2, 52 + offY);
+    ctx.shadowBlur = 0;
+  });
+
+  // ── GO TO HOME — slides in from left ──
+  withAnim(0.08, 0.55, easeOut, t => {
+    const offX = (1-t) * -VW * 0.5;
+    ctx.fillStyle = '#e8ff00';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 32px Courier New';
+    ctx.fillText('←', VW/2 - 90 + offX, VH/2 - 148);
+    ctx.font = 'bold 22px Courier New';
+    ctx.fillText('GO TO HOME', VW/2 + 18 + offX, VH/2 - 148);
+  });
+
+  // ── PLAY button — scales up from center + slides up ──
+  withAnim(0.16, 0.55, easeOutBack, t => {
+    const skew = 7, btnW = 240, btnH = 50;
+    const btnX = VW/2 - btnW/2, btnY = VH/2 - 80;
+    const offY = (1-t) * 40;
+    ctx.save();
+    ctx.translate(VW/2, btnY + btnH/2 + offY);
+    ctx.scale(t, t);
+    ctx.translate(-VW/2, -(btnY + btnH/2));
+    ctx.shadowColor = '#e8ff00';
+    ctx.shadowBlur = 16 * t;
+    ctx.fillStyle = '#e8ff00';
+    ctx.beginPath();
+    ctx.moveTo(btnX + skew, btnY); ctx.lineTo(btnX + btnW, btnY);
+    ctx.lineTo(btnX + btnW - skew, btnY + btnH); ctx.lineTo(btnX, btnY + btnH);
+    ctx.closePath(); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 20px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText('▶  PLAY', VW/2, btnY + btnH/2 + 7);
+    ctx.restore();
+  });
+
+  // ── Checkboxes ──
+  const cbSize = 28;
+  const cbX = VW/2 - 110;
+  const cbY1 = VH/2 + 50;
+  const cbY2 = VH/2 + 110;
+
+  function drawCheckbox(cx, cy, checked, color, label, sublabel){
+    ctx.strokeStyle = checked ? color : '#666';
+    ctx.lineWidth = 2.5;
+    ctx.fillStyle = checked ? `rgba(${color==='#00eeff'?'0,200,255':'232,255,0'},0.15)` : 'rgba(255,255,255,0.04)';
+    ctx.beginPath(); ctx.roundRect(cx, cy, cbSize, cbSize, 5); ctx.fill(); ctx.stroke();
+    if(checked){
+      ctx.strokeStyle = color; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(cx+5, cy+14); ctx.lineTo(cx+11, cy+21); ctx.lineTo(cx+23, cy+6);
+      ctx.stroke(); ctx.lineCap = 'butt';
+    }
+    ctx.fillStyle = checked ? color : '#888';
+    ctx.font = checked ? 'bold 18px Courier New' : '18px Courier New';
+    ctx.textAlign = 'left';
+    ctx.fillText(label, cx + cbSize + 12, cy + 20);
+    if(sublabel){
+      ctx.fillStyle = '#666'; ctx.font = '11px Courier New';
+      ctx.fillText(sublabel, cx + cbSize + 12, cy + 34);
+    }
+  }
+
+  // Checkbox 1 — slides in from right
+  withAnim(0.24, 0.55, easeOut, t => {
+    const offX = (1-t) * VW * 0.5;
+    ctx.save(); ctx.translate(offX, 0);
+    drawCheckbox(cbX, cbY1, invincibleMode, '#00eeff', 'INVINCIBLE MODE', null);
+    ctx.restore();
+  });
+
+  // Checkbox 2 — slides in from right with more delay
+  withAnim(0.32, 0.55, easeOut, t => {
+    const offX = (1-t) * VW * 0.5;
+    ctx.save(); ctx.translate(offX, 0);
+    drawCheckbox(cbX, cbY2, autoKick, '#e8ff00', 'AUTO KICK', autoKick ? null : 'SPACE / TAP to kick');
+    ctx.restore();
+  });
 }
 
 // Store checkbox hit area for tap detection
-const INVINC_CB = { x: VW/2 - 90, y: 0, w: 220, h: 30 };
-function updateInvincCbY(){ INVINC_CB.y = VH/2 + 48; }
+const INVINC_CB = { x: VW/2 - 110, y: 0, w: 280, h: 38 };
+function updateInvincCbY(){ INVINC_CB.y = VH/2 + 50; }
+
+// Auto kick checkbox hit area
+const AUTOKICK_CB = { x: VW/2 - 110, y: 0, w: 280, h: 38 };
+function updateAutoKickCbY(){ AUTOKICK_CB.y = VH/2 + 110; }
+
+// Store home button hit area (texte centré sous PAUSE)
+const HOME_BTN = { x: VW/2 - 140, y: VH/2 - 168, w: 280, h: 36 };
+function updateHomeBtnY(){ HOME_BTN.y = VH/2 - 168; }
+
+// Play button hit area
+const PLAY_BTN = { x: VW/2 - 120, y: 0, w: 240, h: 50 };
+function updatePlayBtnY(){ PLAY_BTN.y = VH/2 - 80; }
+
+function togglePause(){
+  if(!isPaused){
+    // Opening: set paused immediately, start open animation
+    isPaused = true;
+    pauseAnimDir = 1;
+    pauseAnim = 0;
+  } else {
+    // Closing: start close animation; isPaused cleared when anim ends
+    pauseAnimDir = -1;
+  }
+}
+
+function goToHome(){
+  // Arrêt de la boucle de jeu
+  if(loopId){ cancelAnimationFrame(loopId); loopId=null; }
+  isPaused = false;
+  gameOver = false;
+  // Afficher l'écran d'accueil
+  const overlay = document.getElementById('overlay');
+  const finalScore = document.getElementById('final-score');
+  finalScore.style.display = 'none';
+  document.getElementById('startBtn').textContent = 'PLAY';
+  overlay.style.display = 'flex';
+}
+function drawTargetArrow(){
+  if(!currentTarget || currentTarget.dead) return;
+  const z = currentTarget;
+  const scx = sx(z.x);
+  const scy = sy(z.y) - (z.h||20)*ZOOM*0.5 - 10; // above zombie head
+
+  const t = frameCount;
+  // Rainbow hue cycling
+  const hue = (t * 4) % 360;
+  const hue2 = (t * 4 + 120) % 360;
+  const hue3 = (t * 4 + 240) % 360;
+
+  // Bouncing animation: oscillates up and down
+  const bounce = Math.abs(Math.sin(t * 0.12)) * 10;
+  const arrowY = scy - bounce;
+
+  // Arrow size
+  const W = 10, H = Math.round(W * 0.866);
+
+  ctx.save();
+  ctx.shadowBlur = 18;
+
+  // Draw 3 layered glows for rainbow shimmer effect
+  const colors = [
+    `hsl(${hue},100%,60%)`,
+    `hsl(${hue2},100%,60%)`,
+    `hsl(${hue3},100%,60%)`,
+  ];
+
+  for(let i = 0; i < colors.length; i++){
+    ctx.globalAlpha = 0.35 + 0.1*Math.sin(t*0.15 + i*2);
+    ctx.shadowColor = colors[i];
+    ctx.fillStyle = colors[i];
+    // Draw downward-pointing triangle slightly offset for glow blending
+    ctx.beginPath();
+    ctx.moveTo(scx - W/2 - i, arrowY - H - i);
+    ctx.lineTo(scx + W/2 + i, arrowY - H - i);
+    ctx.lineTo(scx,            arrowY + i);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Main solid arrow on top
+  ctx.globalAlpha = 1;
+  // Gradient fill
+  const grad = ctx.createLinearGradient(scx - W/2, arrowY - H, scx + W/2, arrowY);
+  grad.addColorStop(0,   `hsl(${hue},100%,75%)`);
+  grad.addColorStop(0.5, `hsl(${hue2},100%,70%)`);
+  grad.addColorStop(1,   `hsl(${hue3},100%,75%)`);
+  ctx.shadowColor = `hsl(${hue},100%,60%)`;
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(scx - W/2, arrowY - H);
+  ctx.lineTo(scx + W/2, arrowY - H);
+  ctx.lineTo(scx,       arrowY);
+  ctx.closePath();
+  ctx.fill();
+
+  // White highlight edge
+  ctx.globalAlpha = 0.7;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
+  ctx.shadowBlur = 6;
+  ctx.shadowColor = '#ffffff';
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawLowHpFreezeOverlay(){
+  if(megaDash.lowHpFreezeTimer <= 0) return;
+
+  const t = megaDash.lowHpFreezeTimer; // 120 → 0
+  const progress = t / 120; // 1.0 → 0.0
+
+  // Dark vignette pulse
+  ctx.save();
+  const pulse = 0.38 + 0.12 * Math.sin(frameCount * 0.25);
+  ctx.fillStyle = `rgba(0,0,0,${0.45 * pulse})`;
+  ctx.fillRect(0, 0, VW, VH);
+
+  // "DANGER" warning text at top
+  ctx.globalAlpha = 0.92;
+  ctx.font = 'bold 20px Courier New';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#ff2222';
+  ctx.shadowBlur = 18;
+  ctx.fillStyle = '#ff4444';
+  ctx.fillText('⚠ CRITICAL HP ⚠', VW/2, 80);
+
+  // Countdown seconds (2 → 0)
+  const secsLeft = Math.ceil(t / 60);
+  ctx.shadowColor = '#ffffff';
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 36px Courier New';
+  ctx.fillText(secsLeft, VW/2, 120);
+
+  // Progress bar (time remaining) above the mega button
+  const barW = 200, barH = 8;
+  const barX = VW/2 - barW/2;
+  const barY = MEGA_BTN.y - 30;
+  ctx.globalAlpha = 0.8;
+  ctx.fillStyle = '#111';
+  ctx.fillRect(barX, barY, barW, barH);
+  ctx.fillStyle = progress > 0.5 ? '#e8ff00' : '#ff4444';
+  ctx.shadowColor = ctx.fillStyle;
+  ctx.shadowBlur = 10;
+  ctx.fillRect(barX, barY, barW * progress, barH);
+  ctx.shadowBlur = 0;
+
+  ctx.restore();
+}
+
 function loop(timestamp){
   // ── Fixed timestep: always run logic at 60fps regardless of display hz ──
   if(!lastTimestamp) lastTimestamp = timestamp;
@@ -4503,13 +7310,17 @@ function loop(timestamp){
     drawPowerups();
     drawThunderbolts();
     drawFireTrails();
+    drawIceBallTrail();
     drawBiomeObstacles();
+    drawSnakeBoss();
     drawMegaDashTrail();
     drawBall();
     drawBallFire();
+    drawIceBallAura();
     drawBall2();
     drawOrbitBalls();
-    zombies.slice().sort((a,b)=>a.y-b.y).forEach(z=>{ drawZombie(z); drawZombieFire(z); });
+    zombies.slice().sort((a,b)=>a.y-b.y).forEach(z=>{ drawZombie(z); drawZombieFire(z); if(z.frozen&&!z.dead) drawFrozenZombie(z); });
+    drawTargetArrow();
     drawSamuraiGhosts();
     drawPlayer();
     drawNinjaCostume();
@@ -4521,10 +7332,17 @@ function loop(timestamp){
     drawJoystick();
     drawUI();
     drawMegaDashButton();
+    drawLowHpFreezeOverlay();
     drawOneUpFX();
     drawActiveFX();
     drawPauseButton();
-    if(isPaused) drawPauseScreen();
+    // Tick pause animation
+    if(pauseAnimDir !== 0){
+      pauseAnim = Math.min(1, Math.max(0, pauseAnim + pauseAnimDir * PAUSE_ANIM_SPD));
+      if(pauseAnimDir === 1 && pauseAnim >= 1){ pauseAnimDir = 0; }
+      if(pauseAnimDir === -1 && pauseAnim <= 0){ pauseAnimDir = 0; isPaused = false; }
+    }
+    if(isPaused || pauseAnim > 0) drawPauseScreen(pauseAnim);
     loopId=requestAnimationFrame(loop);
   } else {
     drawParticles();
