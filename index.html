@@ -82,9 +82,9 @@ const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
 
 function resize() {
 
-  const scale = Math.max(
-    window.innerWidth / VW,
-    window.innerHeight / VH
+  const scale = Math.min(
+  window.innerWidth / VW,
+  window.innerHeight / VH
   );
 
   const w = VW * scale;
