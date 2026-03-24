@@ -93,7 +93,11 @@ const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
 
 function resize() {
 
-  const scale = window.innerHeight / VH; // 🔥 basé uniquement sur la hauteur
+  const viewportHeight = window.visualViewport
+    ? window.visualViewport.height
+    : window.innerHeight;
+
+  const scale = viewportHeight / VH;
 
   const w = VW * scale;
   const h = VH * scale;
@@ -107,7 +111,7 @@ function resize() {
     (window.innerWidth - w) / 2 + "px";
 
   canvas.style.top =
-    (window.innerHeight - h) / 2 + "px";
+    (viewportHeight - h) / 2 + "px";
 }
 
 window.addEventListener("resize", resize);
