@@ -87,7 +87,7 @@ function resizeCanvas() {
 }
 
 
-const VW = 380, VH = 820;
+const VW = 460, VH = 844;
 const MARGIN = 40;
 const leftX   = MARGIN;
 const rightX  = VW - MARGIN;
@@ -6727,6 +6727,7 @@ const hpY = MARGIN;
   // ── KILLS HUD — pixel-art zombie icons ──
   // Tous les non-géants comptabilisés comme "normal"
   const normalKills = killsByType.normal + killsByType.big + killsByType.tank + killsByType.fast;
+  
 
   // Helper: draw drop shadow text
   function hudText(txt, x2, y2, font2, col2){
@@ -6832,7 +6833,8 @@ const hpY = MARGIN;
     p(1,-12,1,2,'rgba(0,0,0,0.3)');
   }
 
-  const rowH=40, panelStartY=52;
+  const rowH = 40;
+const panelStartY = topY + 50;
   // Layout constants — tout aligné sur la même grille
   const iconCX   = panelX + 13;  // centre X de toutes les icônes
   const textX    = panelX + 30;  // X du label et du score
