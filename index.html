@@ -72,7 +72,27 @@ canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges; 
 // ══════════════════════════════════════
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
-const VW = 390, VH = 844;
+
+function resizeCanvas() {
+  const scaleX = window.innerWidth / VW;
+  const scaleY = window.innerHeight / VH;
+
+  const scale = Math.max(scaleX, scaleY);
+
+  canvas.style.position = "fixed";
+  canvas.style.left = "50%";
+  canvas.style.top = "50%";
+  canvas.style.transform = `translate(-50%, -50%) scale(${scale})`;
+}
+
+const VW = 420, VH = 844;
+const MARGIN = 40;
+const leftX   = MARGIN;
+const rightX  = VW - MARGIN;
+const topY    = MARGIN;
+const bottomY = VH - MARGIN;
+const HUD_Y_OFFSET = MARGIN;
+const baseY = VH - MARGIN;
 canvas.width = VW; canvas.height = VH;
 const ZOOM = 2.4; // camera zoom factor
 
@@ -85,6 +105,7 @@ function resize() {
   const scale = Math.min(
   window.innerWidth / VW,
   window.innerHeight / VH
+  
   );
 
   const w = VW * scale;
@@ -6616,7 +6637,9 @@ function drawJoystick(){
 
 function drawMinimap(){
   // Minimap: 20% bigger than previous (80×144 → 96×173), top-right corner
-  const mmW=96, mmH=173, mmX=VW-mmW-6, mmY=6;
+  const mmW = 96, mmH = 173;
+const mmX = VW - mmW - MARGIN;
+const mmY = MARGIN;
   ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(mmX,mmY,mmW,mmH);
   ctx.strokeStyle='#444'; ctx.lineWidth=1; ctx.strokeRect(mmX,mmY,mmW,mmH);
   // Pitch outline
@@ -6659,11 +6682,12 @@ function drawUI(){
   // ── Common font size for all HUD elements ──
   const F = '16px Courier New';   // labels
   const FB = 'bold 20px Courier New'; // numbers/values
-  const panelX = 8;
+  const panelX = MARGIN;
   const panelW = 130; // width used for energy bar and kill panel
 
   // ── ENERGY BAR — top left, same width as kill panel ──
-  const hpH=13, hpY=6;
+  const hpH = 13;
+const hpY = MARGIN;
   const hpColor=player.hp>50?'#4caf50':player.hp>25?'#ff9800':'#f44336';
   pr(panelX, hpY, panelW, hpH, '#1a1a1a');
   pr(panelX, hpY, panelW*(player.hp/player.maxHp), hpH, hpColor);
@@ -6865,9 +6889,9 @@ function drawUI(){
   // ── SCORE — bas gauche ──
   ctx.shadowColor='rgba(0,0,0,0.95)'; ctx.shadowBlur=8;
   ctx.fillStyle='#ffffff'; ctx.font=F; ctx.textAlign='left';
-  ctx.fillText('SCORE', panelX+4, VH-44);
+ ctx.fillText('SCORE', panelX + 4, baseY - 26);
   ctx.fillStyle='#e8ff00'; ctx.font='bold 28px Courier New';
-  ctx.fillText(score, panelX+4, VH-18);
+  ctx.fillText(score, panelX + 4, baseY);
   ctx.shadowBlur=0;
 
   // ── BALL COUNT — juste au-dessus du score ──
@@ -7010,7 +7034,10 @@ function drawSlowMoOverlay(){
 }
 
 function drawPauseButton(){
-  const bx=VW-44, by=VH-44, bw=36, bh=36;
+  const bw = 36, bh = 36;
+
+const bx = VW - MARGIN - bw;
+const by = VH - MARGIN - bh;
   ctx.fillStyle='rgba(0,0,0,0.65)';
   ctx.fillRect(bx,by,bw,bh);
   ctx.strokeStyle='#555'; ctx.lineWidth=1.5;
@@ -7382,6 +7409,8 @@ function loop(timestamp){
     },1800);
   }
 }
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
 </script>
 </body>
 </html>
