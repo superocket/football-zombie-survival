@@ -77,7 +77,8 @@ function resizeCanvas() {
   const scaleX = window.innerWidth / VW;
   const scaleY = window.innerHeight / VH;
 
-  const scale = Math.max(scaleX, scaleY);
+  // 🔥 on force un léger zoom en plus
+  const scale = Math.max(scaleX, scaleY) * 1.05;
 
   canvas.style.position = "fixed";
   canvas.style.left = "50%";
@@ -85,6 +86,7 @@ function resizeCanvas() {
   canvas.style.transform = `translate(-50%, -50%) scale(${scale})`;
 }
 
+const scale = Math.max(scaleX, scaleY) * 1.08;
 const VW = 420, VH = 844;
 const MARGIN = 40;
 const leftX   = MARGIN;
