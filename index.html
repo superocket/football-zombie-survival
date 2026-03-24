@@ -97,7 +97,9 @@ function resize() {
     ? window.visualViewport.height
     : window.innerHeight;
 
-  const scale = viewportHeight / VH;
+  const SAFE_BOTTOM = 20; // 🔥 ajuste si besoin (15–40)
+
+  const scale = (viewportHeight - SAFE_BOTTOM) / VH;
 
   const w = VW * scale;
   const h = VH * scale;
