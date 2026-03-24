@@ -80,55 +80,21 @@ const ZOOM = 2.4; // camera zoom factor
 const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
                  ('ontouchstart' in window && navigator.maxTouchPoints > 1);
 
-function getRealHeight(){
-  if (window.visualViewport) {
-    return window.visualViewport.height;
-  }
-  return window.innerHeight;
-}
-
-function resize(){
-
-  const realW = window.innerWidth;
-  const realH = getRealHeight();
+function resize() {
 
   const s = Math.min(
-    realW / VW,
-    realH / VH
+    window.innerWidth / VW,
+    window.innerHeight / VH
   );
 
-  canvas.style.width  = (VW * s) + "px";
+  canvas.style.width = (VW * s) + "px";
   canvas.style.height = (VH * s) + "px";
 
-  canvas.style.position = "fixed";
-
-  canvas.style.left =
-    (realW - VW * s) / 2 + "px";
-
-  canvas.style.top =
-    (realH - VH * s) / 2 + "px";
 }
 
 resize();
 
 window.addEventListener("resize", resize);
-
-if (window.visualViewport) {
-  window.visualViewport.addEventListener(
-    "resize",
-    resize
-  );
-    canvas.style.position = '';
-    canvas.style.left = '';
-    canvas.style.top  = '';
-  } else {
-    // Desktop: fill the entire viewport height, center horizontally
-    const s = Math.min(innerWidth/VW, innerHeight/VH);
-    canvas.style.width  = VW*s+'px';
-    canvas.style.height = VH*s+'px';
-  }
-}
-resize(); addEventListener('resize', resize);
 
 // ── Fullscreen button (desktop only) ──
 if(!isMobile){
