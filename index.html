@@ -82,9 +82,24 @@ const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
 
 function resize() {
 
-  canvas.style.width = window.innerWidth + "px";
-  canvas.style.height = window.innerHeight + "px";
+  const scale = Math.max(
+    window.innerWidth / VW,
+    window.innerHeight / VH
+  );
 
+  const w = VW * scale;
+  const h = VH * scale;
+
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+
+  canvas.style.position = "fixed";
+
+  canvas.style.left =
+    (window.innerWidth - w) / 2 + "px";
+
+  canvas.style.top =
+    (window.innerHeight - h) / 2 + "px";
 }
 
 resize();
