@@ -73,17 +73,10 @@ canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges; 
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
-function resizeCanvas() {
-  const scale = window.innerHeight / VH;
-
-  canvas.style.position = "fixed";
-  canvas.style.left = "50%";
-  canvas.style.top = "50%";
-  canvas.style.transform = `translate(-50%, -50%) scale(${scale})`;
-}
 
 
-const VW = 390, VH = 844;
+
+const VW = 380, VH = 844;
 const MARGIN = 10;
 const leftX   = MARGIN;
 const rightX  = VW - MARGIN;
@@ -100,11 +93,7 @@ const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
 
 function resize() {
 
-  const scale = Math.min(
-  window.innerWidth / VW,
-  window.innerHeight / VH
-  
-  );
+  const scale = window.innerHeight / VH; // 🔥 basé uniquement sur la hauteur
 
   const w = VW * scale;
   const h = VH * scale;
@@ -120,8 +109,6 @@ function resize() {
   canvas.style.top =
     (window.innerHeight - h) / 2 + "px";
 }
-
-resize();
 
 window.addEventListener("resize", resize);
 
@@ -7409,8 +7396,7 @@ function loop(timestamp){
     },1800);
   }
 }
-resizeCanvas();
-window.addEventListener('resize', resizeCanvas);
+
 </script>
 </body>
 </html>
