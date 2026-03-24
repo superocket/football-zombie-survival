@@ -74,7 +74,11 @@ const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
 function resizeCanvas() {
-  const scale = window.innerHeight / VH; // 🔥 basé uniquement sur la hauteur
+  const scaleX = window.innerWidth / VW;
+  const scaleY = window.innerHeight / VH;
+
+  // 🔥 on force un léger zoom en plus
+  const scale = Math.max(scaleX, scaleY) * 1.05;
 
   canvas.style.position = "fixed";
   canvas.style.left = "50%";
