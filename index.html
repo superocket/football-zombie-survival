@@ -2826,8 +2826,15 @@ const PUDEF_VIKING_REMAP = {
   'x6balls':    { id:'x6balls',    icon:'AXE', label:'×6 AXES',  color:'#c8a030', glow:'#e8c860' },
 };
 
+// Grand Ma variants: doubleball → +1 FLIP FLOP, x6balls → ×6 FLOPS
+const PUDEF_GRANDMA_REMAP = {
+  'doubleball': { id:'doubleball', icon:'FLOP', label:'+1 FLOP',   color:'#ff69b4', glow:'#ff1493' },
+  'x6balls':    { id:'x6balls',    icon:'FLOP', label:'×6 FLOPS',  color:'#ff69b4', glow:'#ff1493' },
+};
+
 function getPuDef(def){
   if(selectedChar === 1 && PUDEF_VIKING_REMAP[def.id]) return PUDEF_VIKING_REMAP[def.id];
+  if(selectedChar === 2 && PUDEF_GRANDMA_REMAP[def.id]) return PUDEF_GRANDMA_REMAP[def.id];
   return def;
 }
 
@@ -6879,6 +6886,8 @@ function drawPowerups(){
       drawPixelShotgun(px2, py2, 1);
     } else if(def.icon==='AXE'){
       drawPixelAxeIcon(px2, py2);
+    } else if(def.icon==='FLOP'){
+      drawPixelFlipFlopIcon(px2, py2);
     } else {
       ctx.fillText(def.icon, px2, py2+6);
     }
@@ -6907,6 +6916,30 @@ function drawPixelAxeIcon(cx, cy){
   ctx.fillStyle='rgba(255,255,255,0.7)'; ctx.fillRect( 7,-9,1,1);
   // Collar
   ctx.fillStyle='#bbb'; ctx.fillRect(-1,-8,2,4);
+  ctx.restore();
+}
+
+// Draw a mini flip flop icon inside a powerup tile (centered at cx,cy)
+function drawPixelFlipFlopIcon(cx, cy){
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(0.3); // légère inclinaison comme la hache
+  // Semelle — contour sombre
+  ctx.fillStyle = '#c0005a';
+  ctx.beginPath(); ctx.roundRect(-4,-9,9,18,3); ctx.fill();
+  // Semelle — remplissage rose
+  ctx.fillStyle = '#ff69b4';
+  ctx.beginPath(); ctx.roundRect(-3,-8,7,16,2); ctx.fill();
+  // Reflet léger
+  ctx.fillStyle = 'rgba(255,255,255,0.28)';
+  ctx.beginPath(); ctx.roundRect(-2,-7,3,6,1); ctx.fill();
+  // Séparateur blanc en Y
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0,-6); ctx.lineTo(0,0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-3,4); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(3,4); ctx.stroke();
   ctx.restore();
 }
 
@@ -7019,7 +7052,7 @@ function drawActiveFX(){
   if(fx.iceBall.active)    fxList.push({icon:'🧊',color:'#00cfff',timer:fx.iceBall.timer,max:fx.iceBall.max});
   if(ricochetCount>0)      fxList.push({icon:'↩️',color:'#00e5ff',timer:ricochetTimer,max:1800,extra:'×'+ricochetCount});
   if(extraBalls.length>0)  {} // +1 ball/axe powerup: permanent, no gauge shown
-  if(orbitBalls.length>0)  fxList.push({icon: selectedChar===1?'⚔️':'⚽', color:'#ffe066', timer:orbitBallsTimer, max:1200, extra: selectedChar===1?'×6 AXES':'×6 ORBIT'});
+  if(orbitBalls.length>0)  fxList.push({icon: selectedChar===1?'⚔️':selectedChar===2?'🩴':'⚽', color:'#ffe066', timer:orbitBallsTimer, max:1200, extra: selectedChar===1?'×6 AXES':selectedChar===2?'×6 FLOPS':'×6 ORBIT'});
   if(fx.thunder.active)    fxList.push({icon:'⚡',color:'#1565c0',timer:fx.thunder.timer,max:fx.thunder.max});
   if(fx.slowMo.active)     fxList.push({icon:'🐌',color:'#e040fb',timer:fx.slowMo.timer,max:fx.slowMo.max});
   if(fx.shotgun.active)    fxList.push({icon:'💥',color:'#ff5722',timer:fx.shotgun.timer,max:fx.shotgun.max,extra:fx.shotgun.reloading>0?'RELOAD':('×'+fx.shotgun.shots)});
@@ -7060,6 +7093,10 @@ function drawActiveFX(){
     ctx.fillStyle = '#000';
     if(puNotif.icon === 'GUN'){
       drawPixelShotgun(notifX + 26, notifY + 26, 1.7);
+    } else if(puNotif.icon === 'AXE'){
+      ctx.save(); ctx.translate(notifX + 26, notifY + 26); ctx.scale(1.7, 1.7); drawPixelAxeIcon(0, 0); ctx.restore();
+    } else if(puNotif.icon === 'FLOP'){
+      ctx.save(); ctx.translate(notifX + 26, notifY + 26); ctx.scale(1.7, 1.7); drawPixelFlipFlopIcon(0, 0); ctx.restore();
     } else {
       ctx.font = 'bold 28px Courier New';
       ctx.textAlign = 'left';
