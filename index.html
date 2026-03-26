@@ -796,6 +796,18 @@ const BIOMES = [
   { g1:'#3a3a3a', g2:'#2e2e2e', line:'rgba(160,160,180,0.5)', stand:'#080808', filter:'rgba(20,10,30,0.18)'   },
 ];
 
+// Viking biome palettes — champ de bataille rocheux
+// biome 0: sol rocheux gris + touches de vert entre les pierres
+// biome 1: désert (sable) — même transitions que soccer
+// biome 2: neige sur les rochers
+// biome 3: cimetière sombre
+const BIOMES_VIKING = [
+  { g1:'#5a5a5a', g2:'#4a4a4a', line:'rgba(80,80,80,0.0)', stand:'#1a1a1a', filter:null },
+  { g1:'#c8a96e', g2:'#b89558', line:'rgba(200,180,140,0.0)', stand:'#1a1206', filter:'rgba(200,160,80,0.13)' },
+  { g1:'#9ab0c0', g2:'#8aa0b0', line:'rgba(200,220,255,0.0)',  stand:'#0a1220', filter:'rgba(180,210,255,0.12)' },
+  { g1:'#2e2e2e', g2:'#242424', line:'rgba(160,160,180,0.0)', stand:'#080808', filter:'rgba(20,10,30,0.18)'   },
+];
+
 function lerpColor(c1, c2, t){
   // Parse hex or rgba strings → lerp → return hex
   const p = s => {
@@ -814,7 +826,8 @@ function lerpColor(c1, c2, t){
 
 function getCurrentBiomeColors(){
   const t = biomeTransition;
-  const A = BIOMES[biomePrev], B = BIOMES[biome];
+  const biomeSet = (selectedChar === 1) ? BIOMES_VIKING : BIOMES;
+  const A = biomeSet[biomePrev], B = biomeSet[biome];
   return {
     g1:   t>=1 ? B.g1   : lerpColor(A.g1,   B.g1,   t),
     g2:   t>=1 ? B.g2   : lerpColor(A.g2,   B.g2,   t),
@@ -827,27 +840,31 @@ function getCurrentBiomeColors(){
 
 function spawnBiomeObstacles(){
   biomeObstacles = [];
-  if(biome===0) return;
-  const count = biome===1 ? 48 : biome===2 ? 0 : 60; // trees/graves — ×3
+  // Viking biome 0: spawn leafy trees from the start
+  const isViking = selectedChar === 1;
+  if(biome===0 && !isViking) return;
+  const count = isViking
+    ? (biome===0 ? 28 : biome===1 ? 48 : biome===2 ? 0 : 60)
+    : (biome===1 ? 48 : biome===2 ? 0 : 60);
   const margin = 80;
   let attempts=0;
   while(biomeObstacles.length<count && attempts<1200){
     attempts++;
     const ox = PITCH.x+margin + Math.random()*(PITCH.w-margin*2);
     const oy = PITCH.y+margin + Math.random()*(PITCH.h-margin*2);
-    // Not too close to center (keep gameplay area open)
     if(Math.hypot(ox-(PITCH.x+PITCH.w/2), oy-(PITCH.y+PITCH.h/2))<120) continue;
-    // Not too close to other obstacles
     if(biomeObstacles.some(o=>Math.hypot(o.x-ox,o.y-oy)<90)) continue;
-    // Not too close to player spawn
     if(Math.hypot(ox-player.x, oy-player.y)<100) continue;
     const isGrave = biome===3;
+    const isVikingTree = (selectedChar===1 && !isGrave);
     biomeObstacles.push({
       x:ox, y:oy,
-      w: isGrave?18:20, h: isGrave?24:32,
+      // Viking tree: w/h tuned so collision = trunk only (trunk=12px wide, 54px tall at ZOOM 2.4)
+      w: isGrave?18 : isVikingTree?10:20,
+      h: isGrave?24 : isVikingTree?44:32,
       type: isGrave?'grave':'tree',
-      emergeFrame: frameCount + Math.floor(Math.random()*120), // stagger emergence
-      emerged: 0, // 0→1
+      emergeFrame: frameCount + Math.floor(Math.random()*120),
+      emerged: 0,
     });
   }
 }
@@ -899,8 +916,13 @@ function checkObstacleCollision(entity, hw, hh){
   // Push entity out of all obstacles. entity must have .x .y
   for(const o of biomeObstacles){
     if(o.emerged<0.5) continue; // not fully emerged yet
-    const ow=o.w*0.5, oh=o.h*0.4; // collision half-sizes (tighter than visual)
-    const dx=entity.x-o.x, dy=entity.y-o.y;
+    // For Viking trees: collision box is trunk-sized, centered at trunk base (slight y offset down)
+    const isVikingTree = (selectedChar===1 && o.type==='tree');
+    const ow = o.w * 0.5;
+    const oh = o.h * 0.4;
+    // Trunk base is at o.y + small offset so align collision center there
+    const cy = isVikingTree ? o.y + 6 : o.y;
+    const dx=entity.x-o.x, dy=entity.y-cy;
     const overX=hw+ow-Math.abs(dx), overY=hh+oh-Math.abs(dy);
     if(overX>0 && overY>0){
       // Push out on smallest axis
@@ -911,6 +933,7 @@ function checkObstacleCollision(entity, hw, hh){
 }
 
 function drawBiomeObstacles(){
+  // Draw trunks / graves (below player z-order)
   for(const o of biomeObstacles){
     if(o.emerged<=0) continue;
     const ox=Math.round(sx(o.x)), oy=Math.round(sy(o.y));
@@ -918,14 +941,76 @@ function drawBiomeObstacles(){
     ctx.save();
     ctx.translate(ox, oy);
     ctx.scale(scl, scl);
-    if(o.type==='tree') drawDeadTree();
-    else drawGrave();
+    if(o.type==='tree'){
+      if(selectedChar===1 && biome<=1) drawLeafyTreeTrunk();
+      else drawDeadTree();
+    } else {
+      drawGrave();
+    }
     ctx.restore();
   }
 }
 
+function drawBiomeObstacleLeaves(){
+  // Draw leafy canopy AFTER player (higher z-order) — Viking biome 0/1 only
+  if(selectedChar!==1) return;
+  if(biome>1) return;
+  const leafAlpha = biome===0 ? 1 : Math.max(0, 1 - biomeTransition);
+  if(leafAlpha <= 0) return;
+  for(const o of biomeObstacles){
+    if(o.emerged<=0) continue;
+    if(o.type!=='tree') continue;
+    const ox=Math.round(sx(o.x)), oy=Math.round(sy(o.y));
+    const scl=o.emerged;
+    ctx.save();
+    ctx.translate(ox, oy);
+    ctx.scale(scl, scl);
+    ctx.globalAlpha = leafAlpha;
+    drawLeafyTreeCanopy();
+    ctx.restore();
+  }
+}
+
+function drawLeafyTreeTrunk(){
+  // Trunk + branches — BIGGER for Viking biome
+  // Drop shadow under trunk
+  ctx.fillStyle='rgba(0,0,0,0.32)';
+  ctx.beginPath(); ctx.ellipse(3,14,14,5,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#3b2208';
+  ctx.fillRect(-6,-40,12,54);
+  ctx.fillStyle='#2a1804';
+  ctx.fillRect(-3,-38,3,46); ctx.fillRect(3,-32,3,38);
+  ctx.strokeStyle='#3b2208'; ctx.lineWidth=4; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(0,-26); ctx.lineTo(-22,-44); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,-23); ctx.lineTo(20,-40); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,-12);  ctx.lineTo(-14,-26); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,-14); ctx.lineTo(14,-22);  ctx.stroke();
+}
+
+function drawLeafyTreeCanopy(){
+  // Large circular foliage — BIGGER, 3 overlapping green circles
+  // Main canopy
+  ctx.fillStyle='#2d6e1a';
+  ctx.beginPath(); ctx.arc(0,-52,32,0,Math.PI*2); ctx.fill();
+  // Secondary circle left
+  ctx.fillStyle='#266018';
+  ctx.beginPath(); ctx.arc(-20,-40,24,0,Math.PI*2); ctx.fill();
+  // Secondary circle right
+  ctx.fillStyle='#338020';
+  ctx.beginPath(); ctx.arc(18,-38,20,0,Math.PI*2); ctx.fill();
+  // Top highlight (lighter green)
+  ctx.fillStyle='#3d9428';
+  ctx.beginPath(); ctx.arc(-5,-56,18,0,Math.PI*2); ctx.fill();
+  // Small highlight dot
+  ctx.fillStyle='rgba(100,200,60,0.35)';
+  ctx.beginPath(); ctx.arc(-8,-60,10,0,Math.PI*2); ctx.fill();
+}
+
 function drawDeadTree(){
   // Dead tree: dark brown trunk + bare branches
+  // Drop shadow under trunk
+  ctx.fillStyle='rgba(0,0,0,0.3)';
+  ctx.beginPath(); ctx.ellipse(3,12,14,4,0,0,Math.PI*2); ctx.fill();
   // Trunk
   ctx.fillStyle='#3b2208';
   ctx.fillRect(-5,-30,10,38);
@@ -2202,6 +2287,8 @@ function initGame(){
   megaDash.lowHpFreezeTimer=0; megaDash.lowHpFreezeTriggered=false;
   oneUpCount=0; oneUpScoreThreshold=10000; oneUpAnim=0; oneUpFX.phase=0; oneUpFX.timer=0; oneUpFX.shockR=0;
   biome=0; biomePrev=0; biomeTransition=1; snowflakes=[]; biomeObstacles=[];
+  // Viking: spawn leafy trees from start (biome 0)
+  if(selectedChar === 1){ setTimeout(()=>spawnBiomeObstacles(), 50); }
   // Reset boss
   snake.active=false; snake.hp=SNAKE_HP_MAX; snake.dead=false; snake.deadTimer=0; snake.everSpawned=false; snake.firstBossDefeated=false;
   snake.state='hidden'; snake.stateTimer=0; snake.fireballs=[]; snake.fireTimer=0;
@@ -5488,6 +5575,11 @@ function update(){
 function pr(x,y,w,h,c){ ctx.fillStyle=c; ctx.fillRect(Math.round(x),Math.round(y),w,h); }
 
 function drawPitch(){
+  if(selectedChar === 1){ drawBattlefield(); return; }
+  drawSoccerPitch();
+}
+
+function drawSoccerPitch(){
   const bc = getCurrentBiomeColors();
   const stripes=22, sw=PITCH.w/stripes;
   const pitchScreenH = Math.round(PITCH.h * ZOOM); // zoomed height
@@ -5512,25 +5604,19 @@ function drawPitch(){
   const goalX2 = cx + goalW/2;
 
   // ── Outer border — draw as 4 separate lines so we can open goal mouths ──
-  // Left side (full height)
   ctx.beginPath();ctx.moveTo(px(PITCH.x),py(PITCH.y));ctx.lineTo(px(PITCH.x),py(PITCH.y+PITCH.h));ctx.stroke();
-  // Right side (full height)
   ctx.beginPath();ctx.moveTo(px(PITCH.x+PITCH.w),py(PITCH.y));ctx.lineTo(px(PITCH.x+PITCH.w),py(PITCH.y+PITCH.h));ctx.stroke();
-  // Top: left segment + right segment (gap = goal mouth)
   ctx.beginPath();ctx.moveTo(px(PITCH.x),py(PITCH.y));ctx.lineTo(px(goalX1),py(PITCH.y));ctx.stroke();
   ctx.beginPath();ctx.moveTo(px(goalX2),py(PITCH.y));ctx.lineTo(px(PITCH.x+PITCH.w),py(PITCH.y));ctx.stroke();
-  // Bottom: same
   ctx.beginPath();ctx.moveTo(px(PITCH.x),py(PITCH.y+PITCH.h));ctx.lineTo(px(goalX1),py(PITCH.y+PITCH.h));ctx.stroke();
   ctx.beginPath();ctx.moveTo(px(goalX2),py(PITCH.y+PITCH.h));ctx.lineTo(px(PITCH.x+PITCH.w),py(PITCH.y+PITCH.h));ctx.stroke();
 
-  // ── Goal posts ── (small vertical lines outside pitch at goal mouth)
+  // ── Goal posts ──
   ctx.strokeStyle='#ffffff'; ctx.lineWidth=3;
   const postH = ph(30);
-  // Top goal
   ctx.strokeRect(px(goalX1)-2, py(PITCH.y)-postH, 3, postH);
   ctx.strokeRect(px(goalX2)-1, py(PITCH.y)-postH, 3, postH);
   ctx.beginPath();ctx.moveTo(px(goalX1)-1,py(PITCH.y)-postH);ctx.lineTo(px(goalX2)+1,py(PITCH.y)-postH);ctx.stroke();
-  // Bottom goal
   ctx.strokeRect(px(goalX1)-2, py(PITCH.y+PITCH.h), 3, postH);
   ctx.strokeRect(px(goalX2)-1, py(PITCH.y+PITCH.h), 3, postH);
   ctx.beginPath();ctx.moveTo(px(goalX1)-1,py(PITCH.y+PITCH.h)+postH);ctx.lineTo(px(goalX2)+1,py(PITCH.y+PITCH.h)+postH);ctx.stroke();
@@ -5540,12 +5626,12 @@ function drawPitch(){
   // ── Halfway line ──
   ctx.beginPath();ctx.moveTo(px(PITCH.x),py(midY));ctx.lineTo(px(PITCH.x+PITCH.w),py(midY));ctx.stroke();
 
-  // ── Center circle — scaled to pitch width ──
+  // ── Center circle ──
   const circleR = PITCH.w * 0.12;
   ctx.beginPath();ctx.arc(px(cx),py(midY),circleR*ZOOM,0,Math.PI*2);ctx.stroke();
   ctx.fillStyle=bc.line;ctx.beginPath();ctx.arc(px(cx),py(midY),4*ZOOM,0,Math.PI*2);ctx.fill();
 
-  // ── Penalty areas (proportional to pitch) ──
+  // ── Penalty areas ──
   const paW=Math.round(PITCH.w*0.55), paH=Math.round(PITCH.h*0.12);
   const gaH=Math.round(PITCH.h*0.05);
   ctx.strokeRect(px(cx-paW/2), py(PITCH.y), pw(paW), ph(paH));
@@ -5566,10 +5652,242 @@ function drawPitch(){
   ].forEach(([cx2,cy2,s2,e])=>{ctx.beginPath();ctx.arc(px(cx2),py(cy2),cr,s2,e);ctx.stroke();});
 }
 
+// ── Battlefield seed (stable random layout per session) ──
+let _bfSeed = 0;
+function _bfRng(){ _bfSeed = (_bfSeed * 1664525 + 1013904223) & 0xffffffff; return (_bfSeed >>> 0) / 0xffffffff; }
+
+// Pre-generate battlefield decoration layout once
+let _bfLayout = null;
+function _getBfLayout(){
+  if(_bfLayout) return _bfLayout;
+  _bfSeed = 42;
+  const rockGroups = []; // each group: {wx,wy, rocks:[{dw,dh,dx,dy}], moss:[{rx,ry,dx,dy}]}
+  const bonesets = [];   // each: {wx,wy, rot, len}
+
+  // ~55 rock groups scattered across the pitch
+  for(let g=0;g<55;g++){
+    const wx = PITCH.x + 60 + _bfRng()*(PITCH.w-120);
+    const wy = PITCH.y + 60 + _bfRng()*(PITCH.h-120);
+    const numRocks = _bfRng()<0.35 ? 3 : _bfRng()<0.5 ? 2 : 1;
+    const rocks = [];
+    // First (biggest) rock — always horizontal
+    const mainW = 18 + _bfRng()*22; // wide
+    const mainH = 8  + _bfRng()*10;  // flat
+    rocks.push({ dx:0, dy:0, dw:mainW, dh:mainH });
+    if(numRocks>=2){
+      // Smaller overlapping rock — slightly offset, still horizontal
+      const r2w = mainW*0.55 + _bfRng()*8;
+      const r2h = mainH*0.5  + _bfRng()*4;
+      rocks.push({ dx: mainW*0.35 + _bfRng()*8, dy: -r2h*0.4 - _bfRng()*4, dw:r2w, dh:r2h });
+    }
+    if(numRocks>=3){
+      // Third even smaller rock
+      const r3w = mainW*0.35 + _bfRng()*6;
+      const r3h = mainH*0.4  + _bfRng()*3;
+      rocks.push({ dx:-mainW*0.3 - _bfRng()*5, dy:-r3h*0.3 - _bfRng()*3, dw:r3w, dh:r3h });
+    }
+    // Moss patches: 2-4 around and below the group
+    const moss = [];
+    const numMoss = 2 + Math.floor(_bfRng()*3);
+    for(let m=0;m<numMoss;m++){
+      moss.push({
+        dx: (_bfRng()-0.5)*mainW*1.6,
+        dy: mainH*0.4 + _bfRng()*mainH*0.8,  // mostly below rocks
+        rx: 5 + _bfRng()*12,
+        ry: 3 + _bfRng()*6,
+      });
+    }
+    // Small side moss to the left of the group
+    moss.push({ dx:-mainW*0.7-_bfRng()*8, dy:_bfRng()*6, rx:4+_bfRng()*8, ry:2+_bfRng()*4 });
+    rockGroups.push({ wx, wy, rocks, moss });
+  }
+
+  // ~30 bone+skull sets
+  for(let i=0;i<30;i++){
+    bonesets.push({
+      wx: PITCH.x + 50 + _bfRng()*(PITCH.w-100),
+      wy: PITCH.y + 50 + _bfRng()*(PITCH.h-100),
+      rot: _bfRng()*Math.PI,
+      len: 9 + _bfRng()*10,
+    });
+  }
+  _bfLayout = { rockGroups, bonesets };
+  return _bfLayout;
+}
+
+function drawBattlefield(){
+  const bc = getCurrentBiomeColors();
+  const pitchScreenH = Math.round(PITCH.h * ZOOM);
+
+  // ── Sol de base ──
+  ctx.fillStyle = bc.g1;
+  ctx.fillRect(Math.round(sx(PITCH.x)), Math.round(sy(PITCH.y)), Math.ceil(PITCH.w*ZOOM)+2, pitchScreenH);
+
+  const layout = _getBfLayout();
+  const isSnow  = biome===2 || (biomePrev===2 && biomeTransition<1);
+  const snowAmt = biome===2 ? biomeTransition : biomePrev===2 ? 1-biomeTransition : 0;
+  const isGrave = biome===3;
+
+  // ── Rock groups ──
+  for(let g=0;g<layout.rockGroups.length;g++){
+    const grp = layout.rockGroups[g];
+    const gx = Math.round(sx(grp.wx)), gy = Math.round(sy(grp.wy));
+    if(gx<-80||gx>VW+80||gy<-60||gy>VH+60) continue;
+
+    // Draw moss BEHIND rocks (below & sides)
+    for(const m of grp.moss){
+      const mx2 = Math.round(gx + m.dx*ZOOM*0.4);
+      const my2 = Math.round(gy + m.dy*ZOOM*0.4);
+      if(isSnow){
+        ctx.fillStyle = lerpColor('#2d5a1a','#ddeeff', snowAmt*0.7);
+      } else if(isGrave){
+        ctx.fillStyle = 'rgba(40,50,35,0.5)';
+      } else {
+        ctx.fillStyle = biome===1 ? 'rgba(120,90,40,0.3)' : '#2d5a1a';
+      }
+      ctx.globalAlpha = isSnow ? 0.4 : biome===1 ? 0.25 : 0.55;
+      ctx.beginPath();
+      ctx.ellipse(mx2, my2, Math.round(m.rx*ZOOM*0.38), Math.round(m.ry*ZOOM*0.38), 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // Draw rocks (biggest first, then smaller on top)
+    for(let ri=0;ri<grp.rocks.length;ri++){
+      const r = grp.rocks[ri];
+      const rx2 = Math.round(gx + r.dx*ZOOM*0.4);
+      const ry2 = Math.round(gy + r.dy*ZOOM*0.4);
+      const rw = Math.round(r.dw*ZOOM*0.38);
+      const rh = Math.round(r.dh*ZOOM*0.38);
+
+      // Shadow
+      ctx.fillStyle='rgba(0,0,0,0.3)';
+      ctx.beginPath(); ctx.ellipse(rx2+2,ry2+3,rw,rh*0.7,0,0,Math.PI*2); ctx.fill();
+
+      // Rock body — tinted by biome
+      let rockCol;
+      if(isSnow)       rockCol = lerpColor('#606070','#b0c4d8', snowAmt*0.55);
+      else if(isGrave) rockCol = '#383838';
+      else if(biome===1) rockCol = lerpColor('#606070','#a08858', biomeTransition*0.6);
+      else             rockCol = '#636370';
+      ctx.fillStyle = rockCol;
+      ctx.beginPath(); ctx.ellipse(rx2,ry2,rw,rh,0,0,Math.PI*2); ctx.fill();
+
+      // Highlight top-left
+      ctx.fillStyle='rgba(255,255,255,0.18)';
+      ctx.beginPath(); ctx.ellipse(rx2-rw*0.2, ry2-rh*0.25, rw*0.45, rh*0.32, -0.3, 0, Math.PI*2); ctx.fill();
+      // Fissure
+      ctx.strokeStyle='rgba(0,0,0,0.28)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(rx2-rw*0.1,ry2-rh*0.1); ctx.lineTo(rx2+rw*0.2,ry2+rh*0.3); ctx.stroke();
+
+      // Snow cap (biome 2)
+      if(snowAmt>0){
+        ctx.save(); ctx.globalAlpha=snowAmt*0.9;
+        ctx.fillStyle='#e8f2ff';
+        ctx.beginPath(); ctx.ellipse(rx2-rw*0.05, ry2-rh*0.3, rw*0.75, rh*0.45, 0, Math.PI, Math.PI*2); ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
+  // ── Bones + skull ──
+  const boneAlpha = biome===1 ? 0.22 : biome===2 ? 0.12 : 0.8;
+  const boneColor = biome===3 ? '#aaaaaa' : '#d0c49a';
+  if(boneAlpha>0.1){
+    ctx.save();
+    ctx.globalAlpha = boneAlpha;
+    for(let i=0;i<layout.bonesets.length;i++){
+      const b = layout.bonesets[i];
+      const bx2=Math.round(sx(b.wx)), by2=Math.round(sy(b.wy));
+      if(bx2<-40||bx2>VW+40||by2<-30||by2>VH+30) continue;
+      const blen=Math.round(b.len*ZOOM*0.36);
+
+      ctx.save();
+      ctx.translate(bx2, by2);
+
+      // ── Drop shadow under bones ──
+      ctx.save();
+      ctx.globalAlpha = boneAlpha * 0.45;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.beginPath(); ctx.ellipse(3, 5, blen*1.1, 4, 0, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+
+      // ── Bones ──
+      ctx.rotate(b.rot);
+      ctx.fillStyle=boneColor;
+      // Long bone
+      ctx.fillRect(-blen,-2,blen*2,3);
+      ctx.beginPath(); ctx.arc(-blen,0,3,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc( blen,0,3,0,Math.PI*2); ctx.fill();
+      // Cross bone
+      ctx.rotate(Math.PI/2);
+      const bl2=Math.round(blen*0.6);
+      ctx.fillRect(-bl2,-1,bl2*2,2);
+      ctx.beginPath(); ctx.arc(-bl2,0,2,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc( bl2,0,2,0,Math.PI*2); ctx.fill();
+      ctx.restore();
+
+      // ── Skull next to bones — BIGGER & more visible ──
+      const skullX = bx2 + Math.round(blen*1.6);
+      const skullY = by2 - 4;
+      // Shadow under skull
+      ctx.save();
+      ctx.globalAlpha = boneAlpha * 0.45;
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.beginPath(); ctx.ellipse(skullX+2, skullY+10, 9, 3.5, 0, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+      // Draw skull
+      ctx.save();
+      ctx.translate(skullX, skullY);
+      ctx.scale(ZOOM*0.22, ZOOM*0.22); // was 0.14 — now 57% bigger
+      // Cranium
+      ctx.fillStyle = boneColor;
+      ctx.beginPath(); ctx.ellipse(0,-4,10,9,0,0,Math.PI*2); ctx.fill();
+      // Cranium highlight
+      ctx.fillStyle = 'rgba(255,255,255,0.18)';
+      ctx.beginPath(); ctx.ellipse(-2,-6,4,3,0,0,Math.PI*2); ctx.fill();
+      // Jaw
+      ctx.fillStyle = lerpColor(boneColor,'#888',0.3);
+      ctx.fillRect(-6,2,12,6);
+      // Eye sockets — larger, more visible
+      ctx.fillStyle='rgba(0,0,0,0.85)';
+      ctx.beginPath(); ctx.ellipse(-3.5,-4,3.2,3.2,0,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse( 3.5,-4,3.2,3.2,0,0,Math.PI*2); ctx.fill();
+      // Nose hole
+      ctx.beginPath(); ctx.ellipse(0,-0.5,1.5,1.8,0,0,Math.PI*2); ctx.fill();
+      // Teeth — more visible
+      ctx.fillStyle=boneColor;
+      [-4,-2,0,2].forEach(tx=>{ ctx.fillRect(tx,3,1.6,3.5); });
+      // Dark outline for readability
+      ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=1.2;
+      ctx.beginPath(); ctx.ellipse(0,-4,10,9,0,0,Math.PI*2); ctx.stroke();
+      ctx.restore();
+
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+}
+
 function drawStands(){
   const bc = getCurrentBiomeColors();
-  ctx.fillStyle = bc.stand;
-  ctx.fillRect(0,0,VW,VH);
+  if(selectedChar === 1){
+    // Viking: ciel de champ de bataille
+    // Biome 0: ciel gris orageux / biome 1: ocre poussiéreux / biome 2: blanc neigeux / biome 3: noir nuit
+    const skyColors = ['#1a1a2a','#2a1a0a','#0a1220','#080808'];
+    const skyHorizColors = ['#2a2a3a','#3a2010','#1a2a3a','#141414'];
+    const sc = skyColors[biome] || '#1a1a2a';
+    const sh = skyHorizColors[biome] || '#2a2a3a';
+    // Gradient vertical : plus sombre en haut, légèrement plus chaud à l'horizon
+    const grad = ctx.createLinearGradient(0,0,0,sy(PITCH.y));
+    grad.addColorStop(0, sc);
+    grad.addColorStop(1, sh);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0,0,VW,VH);
+  } else {
+    ctx.fillStyle = bc.stand;
+    ctx.fillRect(0,0,VW,VH);
+  }
 }
 
 function drawPlayer(){
@@ -8298,6 +8616,7 @@ function loop(timestamp){
     drawSamuraiSword();
     drawShotgunAim();
     drawSlowMoOverlay();
+    drawBiomeObstacleLeaves();
     drawBiomeFilter();
     drawSnowflakes();
     drawJoystick();
