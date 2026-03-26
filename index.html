@@ -39,7 +39,7 @@ canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges; 
   text-transform:uppercase; text-align:center;
   text-shadow:0 0 18px #e8ff00aa; margin-bottom:6px;
 }
-.sub { color:#ff4444; font-size:11px; letter-spacing:2px; margin-bottom:26px; }
+.sub { color:#ff4444; font-size:11px; letter-spacing:2px; margin-bottom:16px; }
 .score-display { color:#fff; font-size:13px; margin-bottom:18px; text-align:center; letter-spacing:1px; }
 #overlay button {
   background:#e8ff00; border:none; color:#000;
@@ -56,17 +56,185 @@ canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges; 
 <body>
 <canvas id="gameCanvas"></canvas>
 <div id="overlay">
-  <h1>&#x26BD; FOOTBALL<br>ZOMBIE SURVIVAL</h1>
+  <h1 id="overlayTitle">&#x26BD; FOOTBALL<br>ZOMBIE SURVIVAL</h1>
   <div class="sub">&#8212; HORDE EDITION &#8212;</div>
   <div class="score-display" id="final-score" style="display:none"></div>
+
+  <!-- Character Selection Slider -->
+  <div id="char-select" style="width:100%;max-width:340px;margin-bottom:18px;">
+    <div style="color:#aaa;font-size:10px;letter-spacing:2px;text-align:center;margin-bottom:10px;text-transform:uppercase;">Choose your fighter</div>
+    <div style="display:flex;align-items:center;justify-content:center;gap:8px;user-select:none;">
+      <button id="char-prev" onclick="charSlide(-1)" style="background:none;border:2px solid #e8ff00;color:#e8ff00;font-size:20px;width:32px;height:48px;cursor:pointer;clip-path:polygon(0 50%,100% 0,100% 100%);padding:0;flex-shrink:0;">&#8249;</button>
+      <div id="char-cards-viewport" style="overflow:hidden;width:220px;flex-shrink:0;">
+        <div id="char-cards-track" style="display:flex;transition:transform 0.32s cubic-bezier(.4,0,.2,1);">
+          <!-- Card 0: Soccer Man -->
+          <div class="char-card" style="min-width:220px;box-sizing:border-box;padding:14px 18px;background:rgba(232,255,0,0.07);border:2px solid #e8ff00;text-align:center;">
+            <canvas id="preview-soccer" width="60" height="70" style="image-rendering:pixelated;display:block;margin:0 auto 8px;"></canvas>
+            <div style="color:#e8ff00;font-size:14px;font-weight:bold;letter-spacing:2px;">SOCCER MAN</div>
+            <div style="color:#aaa;font-size:10px;margin-top:4px;">Kicks a football &#x26BD;<br>Fast & deadly</div>
+          </div>
+          <!-- Card 1: Viking Man -->
+          <div class="char-card" style="min-width:220px;box-sizing:border-box;padding:14px 18px;background:rgba(180,140,60,0.10);border:2px solid #c8a830;text-align:center;">
+            <canvas id="preview-viking" width="60" height="70" style="image-rendering:pixelated;display:block;margin:0 auto 8px;"></canvas>
+            <div style="color:#c8a830;font-size:14px;font-weight:bold;letter-spacing:2px;">VIKING MAN</div>
+            <div style="color:#aaa;font-size:10px;margin-top:4px;">Throws a Hatchet &#x2694;<br>Returning axe</div>
+          </div>
+        </div>
+      </div>
+      <button id="char-next" onclick="charSlide(1)" style="background:none;border:2px solid #e8ff00;color:#e8ff00;font-size:20px;width:32px;height:48px;cursor:pointer;clip-path:polygon(0 0,100% 50%,0 100%);padding:0;flex-shrink:0;">&#8250;</button>
+    </div>
+    <!-- Dots -->
+    <div style="display:flex;justify-content:center;gap:8px;margin-top:10px;">
+      <div class="char-dot active-dot" id="dot-0" onclick="charSlide(0-charIdx)" style="width:8px;height:8px;border-radius:50%;background:#e8ff00;cursor:pointer;transition:background 0.2s;"></div>
+      <div class="char-dot" id="dot-1" onclick="charSlide(1-charIdx)" style="width:8px;height:8px;border-radius:50%;background:#444;cursor:pointer;transition:background 0.2s;"></div>
+    </div>
+  </div>
+
   <button id="startBtn" onclick="startGame()">PLAY</button>
-  <div class="instructions">
+  <div class="instructions" id="char-instructions">
     HOLD finger &#8594; move your player<br>
     Ball auto-shoots visible zombies<br>
     More kills &#8594; bigger horde !
   </div>
 </div>
 <script>
+// ══════════════════════════════════════
+// CHARACTER SELECTION
+// ══════════════════════════════════════
+let selectedChar = 0; // 0 = Soccer Man, 1 = Viking Man
+let charIdx = 0;
+
+function charSlide(delta){
+  const n = 2; // number of characters
+  charIdx = Math.max(0, Math.min(n-1, charIdx + delta));
+  selectedChar = charIdx;
+  document.getElementById('char-cards-track').style.transform = `translateX(-${charIdx * 220}px)`;
+  // Update dots
+  for(let i=0;i<n;i++){
+    const dot = document.getElementById('dot-'+i);
+    if(dot){ dot.style.background = i===charIdx ? '#e8ff00' : '#444'; }
+  }
+  // Update instruction text
+  const instr = document.getElementById('char-instructions');
+  if(instr){
+    if(charIdx === 1){
+      instr.innerHTML = 'HOLD finger &#8594; move your Viking<br>Hatchet auto-throws at zombies<br>Axe returns like a boomerang !';
+    } else {
+      instr.innerHTML = 'HOLD finger &#8594; move your player<br>Ball auto-shoots visible zombies<br>More kills &#8594; bigger horde !';
+    }
+  }
+}
+
+// Swipe support for character cards
+let charTouchStartX = 0;
+document.addEventListener('DOMContentLoaded', ()=>{
+  const track = document.getElementById('char-cards-track');
+  const viewport = document.getElementById('char-cards-viewport');
+  if(viewport){
+    viewport.addEventListener('touchstart', e=>{ charTouchStartX = e.touches[0].clientX; }, {passive:true});
+    viewport.addEventListener('touchend', e=>{
+      const dx = e.changedTouches[0].clientX - charTouchStartX;
+      if(Math.abs(dx) > 30) charSlide(dx < 0 ? 1 : -1);
+    }, {passive:true});
+  }
+  // Draw character previews
+  drawCharPreviews();
+});
+
+function drawCharPreviews(){
+  drawSoccerPreview();
+  drawVikingPreview();
+}
+
+function drawSoccerPreview(){
+  const canvas2 = document.getElementById('preview-soccer');
+  if(!canvas2) return;
+  const c = canvas2.getContext('2d');
+  c.clearRect(0,0,60,70);
+  const x=30, y=40;
+  function pr2(px,py,pw,ph,col){ c.fillStyle=col; c.fillRect(px,py,pw,ph); }
+  // Shadow
+  c.fillStyle='rgba(0,0,0,0.18)'; c.beginPath(); c.ellipse(x,y+15,10,3,0,0,Math.PI*2); c.fill();
+  // Legs
+  pr2(x-3,y+7,4,9,'#e8b89a'); pr2(x,y+7,4,9,'#f0c8a8');
+  // Socks + shoes
+  pr2(x-4,y+13,4,3,'#1565c0'); pr2(x,y+13,4,3,'#1565c0');
+  pr2(x-5,y+15,5,2,'#111'); pr2(x-1,y+15,5,2,'#111');
+  // Shorts
+  pr2(x-5,y+2,10,6,'#e0e0e0'); pr2(x-5,y+2,10,1,'#bdbdbd');
+  // Jersey
+  pr2(x-6,y-5,12,8,'#1976d2'); pr2(x-2,y-5,4,2,'#fff');
+  c.fillStyle='#fff'; c.font='bold 5px Courier New'; c.textAlign='center'; c.fillText('9',x,y-1);
+  // Arms
+  pr2(x-9,y-4,3,9,'#1976d2'); pr2(x+6,y-4,3,9,'#1976d2');
+  // Neck + head
+  pr2(x-2,y-9,4,4,'#e8b89a'); pr2(x-7,y-22,14,14,'#f5c99a');
+  pr2(x-7,y-22,14,5,'#4e342e');
+  pr2(x-8,y-17,2,3,'#e0a87a'); pr2(x+6,y-17,2,3,'#e0a87a');
+  pr2(x-3,y-16,3,3,'#fff'); pr2(x+1,y-16,3,3,'#fff');
+  pr2(x-2,y-15,2,2,'#1a1a1a'); pr2(x+2,y-15,2,2,'#1a1a1a');
+  // Ball at feet
+  c.fillStyle='#fff'; c.beginPath(); c.arc(x+9,y+14,5,0,Math.PI*2); c.fill();
+  c.fillStyle='#1a1a1a'; c.beginPath(); c.arc(x+9,y+14,1.5,0,Math.PI*2); c.fill();
+}
+
+function drawVikingPreview(){
+  const canvas2 = document.getElementById('preview-viking');
+  if(!canvas2) return;
+  const c = canvas2.getContext('2d');
+  c.clearRect(0,0,60,70);
+  const x=30, y=40;
+  function pr2(px,py,pw,ph,col){ c.fillStyle=col; c.fillRect(px,py,pw,ph); }
+  // Shadow
+  c.fillStyle='rgba(0,0,0,0.18)'; c.beginPath(); c.ellipse(x,y+15,10,3,0,0,Math.PI*2); c.fill();
+  // Legs (brown boots)
+  pr2(x-3,y+7,4,9,'#d4a870'); pr2(x,y+7,4,9,'#dab880');
+  pr2(x-4,y+13,4,4,'#5d3a1a'); pr2(x,y+13,4,4,'#5d3a1a');
+  pr2(x-5,y+16,5,2,'#3d2210'); pr2(x-1,y+16,5,2,'#3d2210');
+  // Shorts/belt area (brown tunic)
+  pr2(x-5,y+2,10,6,'#8B4513'); pr2(x-5,y+2,10,1,'#6B3410');
+  // Tunic/jersey (brown leather)
+  pr2(x-6,y-5,12,8,'#8B4513');
+  // Metal chest piece
+  pr2(x-4,y-4,8,5,'#888'); pr2(x-3,y-3,6,3,'#aaa');
+  // Arms
+  pr2(x-9,y-4,3,9,'#8B4513'); pr2(x+6,y-4,3,9,'#8B4513');
+  // Skin forearms
+  pr2(x-9,y+2,3,3,'#d4a870'); pr2(x+6,y+2,3,3,'#d4a870');
+  // Neck + head (skin)
+  pr2(x-2,y-9,4,4,'#d4a870'); pr2(x-7,y-22,14,14,'#d4a870');
+  // Blonde hair sides
+  pr2(x-7,y-18,2,6,'#d4aa00'); pr2(x+5,y-18,2,6,'#d4aa00');
+  // Blonde beard
+  pr2(x-5,y-11,10,5,'#d4aa00'); pr2(x-4,y-7,8,4,'#c49a00');
+  // Ears
+  pr2(x-8,y-17,2,3,'#c8945a'); pr2(x+6,y-17,2,3,'#c8945a');
+  // Eyes (blue)
+  pr2(x-3,y-16,3,3,'#fff'); pr2(x+1,y-16,3,3,'#fff');
+  pr2(x-2,y-15,2,2,'#1a5fa0'); pr2(x+2,y-15,2,2,'#1a5fa0');
+  // Viking helmet (iron grey, horns)
+  pr2(x-7,y-26,14,6,'#888'); // helm base
+  pr2(x-7,y-28,3,4,'#777'); pr2(x+5,y-28,3,4,'#777'); // horn base
+  pr2(x-8,y-32,3,5,'#999'); pr2(x+6,y-32,3,5,'#999'); // horns
+  pr2(x-3,y-24,6,2,'#aaa'); // helm highlight
+  // Mini double-bladed axe at side (2 blades top only)
+  c.save(); c.translate(x+14,y+2); c.rotate(-0.3);
+  // Handle
+  c.fillStyle='#6B3A20'; c.fillRect(-1,-6,2,13);
+  c.fillStyle='#7d4a28'; c.fillRect(-1,-6,1,11);
+  // Left blade (top only)
+  c.fillStyle='#888';
+  c.fillRect(-6,-8,4,3); c.fillRect(-5,-6,4,4); c.fillRect(-4,-3,3,2);
+  c.fillStyle='#bbb'; c.fillRect(-6,-8,1,3);
+  // Right blade (top only)
+  c.fillStyle='#888';
+  c.fillRect( 2,-8,4,3); c.fillRect( 1,-6,4,4); c.fillRect( 1,-3,3,2);
+  c.fillStyle='#bbb'; c.fillRect( 5,-8,1,3);
+  // Collar
+  c.fillStyle='#999'; c.fillRect(-1,-6,2,4);
+  c.restore();
+}
+
 // ══════════════════════════════════════
 // SETUP
 // ══════════════════════════════════════
@@ -1870,6 +2038,8 @@ const oneUpFX = { phase:0, timer:0, shockR:0 };
 // ══════════════════════════════════════
 function startGame(){
   getAC();
+  // Lock in selected character
+  selectedChar = charIdx;
   document.getElementById('overlay').style.display='none';
   document.getElementById('final-score').style.display='none';
   if(loopId) cancelAnimationFrame(loopId);
@@ -2520,6 +2690,17 @@ const PUDEF = [
   { id:'iceball',    icon:'🧊', label:'ICE BALL',   color:'#00cfff', glow:'#aaeeff' },
 ];
 
+// Viking variants: doubleball → +1 AXE, x6balls → ×6 AXES
+const PUDEF_VIKING_REMAP = {
+  'doubleball': { id:'doubleball', icon:'AXE', label:'+1 AXE',   color:'#c8a030', glow:'#e8c860' },
+  'x6balls':    { id:'x6balls',    icon:'AXE', label:'×6 AXES',  color:'#c8a030', glow:'#e8c860' },
+};
+
+function getPuDef(def){
+  if(selectedChar === 1 && PUDEF_VIKING_REMAP[def.id]) return PUDEF_VIKING_REMAP[def.id];
+  return def;
+}
+
 function spawnPowerup(){
   // Spawn within visible screen area near the player
   const margin = 30;
@@ -2567,11 +2748,12 @@ const EXTRA_BALL_OFFSETS = [
 
 function activatePowerup(def){
   SFX.powerupPickup();
-  // Notification HUD
+  // Notification HUD — use Viking remapping if needed
+  const displayDef = getPuDef(def);
   puNotif.timer = puNotif.maxTimer;
-  puNotif.icon  = def.icon;
-  puNotif.label = def.label;
-  puNotif.color = def.glow || def.color || '#e8ff00';
+  puNotif.icon  = displayDef.icon;
+  puNotif.label = displayDef.label;
+  puNotif.color = displayDef.glow || displayDef.color || '#e8ff00';
   switch(def.id){
     case 'fireball':
       fx.fireBall.active=true; fx.fireBall.timer=fx.fireBall.max; break;
@@ -2832,10 +3014,11 @@ function drawOrbitBalls(){
   if(allHome){
     // Subtle glow ring showing orbit path
     ctx.save();
+    const ringColor = selectedChar===1 ? '#e8c860' : '#e8ff00';
     ctx.globalAlpha=0.12+0.05*Math.sin(frameCount*0.08);
-    ctx.strokeStyle='#e8ff00';
+    ctx.strokeStyle=ringColor;
     ctx.lineWidth=1.5;
-    ctx.shadowColor='#e8ff00'; ctx.shadowBlur=8;
+    ctx.shadowColor=ringColor; ctx.shadowBlur=8;
     ctx.beginPath();
     ctx.arc(Math.round(sx(player.x)), Math.round(sy(player.y)), ORBIT_R*ZOOM, 0, Math.PI*2);
     ctx.stroke();
@@ -2847,22 +3030,39 @@ function drawOrbitBalls(){
     const by=Math.round(sy(ob.y-(ob.z||0)));
     const br=Math.round(ob.ballR*ZOOM*0.8);
 
-    ctx.save();
-    // Glow
-    ctx.shadowColor='#e8ff00'; ctx.shadowBlur=10;
-    // Ball body (pentagon pixel look)
-    ctx.fillStyle='#111';
-    ctx.beginPath(); ctx.arc(bx,by,br,0,Math.PI*2); ctx.fill();
-    // White panels
-    ctx.fillStyle='#ffffff';
-    ctx.save();
-    ctx.translate(bx,by);
-    ctx.rotate(ob.spin);
-    ctx.fillRect(-br*0.45,-br*0.45,br*0.9,br*0.9);
-    ctx.fillStyle='#e8ff00';
-    ctx.fillRect(-br*0.2,-br*0.2,br*0.4,br*0.4);
-    ctx.restore();
-    ctx.restore();
+    if(selectedChar === 1){
+      // Viking: draw mini rotating hatchet
+      ctx.save();
+      ctx.translate(bx, by);
+      ctx.rotate(ob.spin);
+      ctx.shadowColor='#e8c860'; ctx.shadowBlur=10;
+      ctx.scale(0.72, 0.72); // slightly smaller than main hatchet
+      if(fx.iceBall && fx.iceBall.active){
+        _drawDoubleAxeShape('#7ac8ee','#aaddff','#4a90c0');
+      } else if(fx.fireBall && fx.fireBall.active){
+        _drawDoubleAxeShape('#cc3300','#ff7700','#7a2200');
+      } else {
+        _drawDoubleAxeShape('#888','#bbb','#6B3A20');
+      }
+      ctx.restore();
+    } else {
+      ctx.save();
+      // Glow
+      ctx.shadowColor='#e8ff00'; ctx.shadowBlur=10;
+      // Ball body (pentagon pixel look)
+      ctx.fillStyle='#111';
+      ctx.beginPath(); ctx.arc(bx,by,br,0,Math.PI*2); ctx.fill();
+      // White panels
+      ctx.fillStyle='#ffffff';
+      ctx.save();
+      ctx.translate(bx,by);
+      ctx.rotate(ob.spin);
+      ctx.fillRect(-br*0.45,-br*0.45,br*0.9,br*0.9);
+      ctx.fillStyle='#e8ff00';
+      ctx.fillRect(-br*0.2,-br*0.2,br*0.4,br*0.4);
+      ctx.restore();
+      ctx.restore();
+    }
   }
 }
 
@@ -4425,7 +4625,7 @@ function update(){
     }
   } else {
     ball.x+=ball.vx; ball.y+=ball.vy;
-    ball.spin+=0.32;
+    ball.spin += selectedChar===1 ? 0.38 : 0.32; // axe spins faster
     if(ball.z>0||ball.zv>0){ ball.z+=ball.zv; ball.zv-=0.22; if(ball.z<0){ball.z=0;ball.zv=0;} }
     // Fire trail — spawn one segment every 2 frames, each with its own pixel state
     if(fx.fireBall.active && !ball.returning && frameCount%2===0){
@@ -5236,6 +5436,11 @@ function drawStands(){
 }
 
 function drawPlayer(){
+  if(selectedChar === 1){ drawVikingPlayer(); return; }
+  drawSoccerPlayer();
+}
+
+function drawSoccerPlayer(){
   const x=Math.round(sx(player.x)), y=Math.round(sy(player.y));
   const d=player.dir, leg=player.animFrame;
   const fl=player.hitFlash>0&&frameCount%3<2;
@@ -5245,120 +5450,68 @@ function drawPlayer(){
   ctx.beginPath();ctx.ellipse(x,y+13,10,3,0,0,Math.PI*2);ctx.fill();
 
   // ── Leg animation offsets ──
-  // leg 0=idle, 1=step fwd, 2=idle, 3=step back
-  const legFwd  = (leg===1)?3:(leg===3)?-3:0;  // front leg Y offset
-  const legBack = (leg===1)?-2:(leg===3)?2:0;   // back leg Y offset
+  const legFwd  = (leg===1)?3:(leg===3)?-3:0;
+  const legBack = (leg===1)?-2:(leg===3)?2:0;
 
-  // ── KICK ANIMATION — big visible leg swing ──
+  // ── KICK ANIMATION ──
   if(player.kickAnim>0){
-    // Phase 0→1→0 over 35 frames: peak at frame 25 (hold), snap back fast
-    const kt = player.kickAnim/18;
-    // Slow rise, hold at peak, fast snap back
     let kickPhase;
-    if(player.kickAnim > 6){
-      kickPhase = Math.min(1, (18-player.kickAnim)/5); // rises over first 5f
-    } else {
-      kickPhase = player.kickAnim/6; // snaps back over last 6f
-    }
-
+    if(player.kickAnim > 6){ kickPhase = Math.min(1, (18-player.kickAnim)/5); }
+    else { kickPhase = player.kickAnim/6; }
     const d2 = player.dir;
-    // Upper leg: raises forward from hip
-    const hipX = x + d2*3;
-    const hipY = y + 5;
-    const thighLen = 12;
-    // Thigh swings forward — angle goes from 90° (down) to 30° (forward+up)
+    const hipX = x + d2*3, hipY = y + 5, thighLen = 12;
     const thighAngle = (Math.PI/2) - kickPhase*(Math.PI*0.55);
     const kneeX = Math.round(hipX + Math.cos(thighAngle)*thighLen * d2);
     const kneeY = Math.round(hipY + Math.sin(thighAngle)*thighLen);
-
-    // Draw thigh (upper leg) as thick line
     ctx.strokeStyle='#1976d2'; ctx.lineWidth=4;
     ctx.beginPath(); ctx.moveTo(hipX, hipY); ctx.lineTo(kneeX, kneeY); ctx.stroke();
-
-    // Shin swings even more forward at peak
     const shinLen = 11;
     const shinAngle = thighAngle - kickPhase*(Math.PI*0.45);
     const footX = Math.round(kneeX + Math.cos(shinAngle)*shinLen * d2);
     const footY = Math.round(kneeY + Math.sin(shinAngle)*shinLen);
-
-    ctx.strokeStyle='#e8b89a'; ctx.lineWidth=3; // skin colour for shin
+    ctx.strokeStyle='#e8b89a'; ctx.lineWidth=3;
     ctx.beginPath(); ctx.moveTo(kneeX, kneeY); ctx.lineTo(footX, footY); ctx.stroke();
-
-    // Shoe — big visible block at foot tip
-    ctx.fillStyle='#111';
-    ctx.fillRect(footX - 1, footY - 1, 5, 3);
-    // White stripe on shoe
-    ctx.fillStyle='#fff';
-    ctx.fillRect(footX + (d2>0?1:-3), footY - 1, 2, 1);
+    ctx.fillStyle='#111'; ctx.fillRect(footX - 1, footY - 1, 5, 3);
+    ctx.fillStyle='#fff'; ctx.fillRect(footX + (d2>0?1:-3), footY - 1, 2, 1);
   }
 
-  // ── SHORTS (white) ──
   pr(x-5, y+2, 10, 6, fl?'#ffaaaa':'#e0e0e0');
-  // shorts stripe
   pr(x-5, y+2, 10, 1, '#bdbdbd');
-
-  // ── LEGS (skin) ──
-  // Back leg
   pr(x-3, y+7+legBack, 4, 8, '#e8b89a');
-  // Front leg
   pr(x-1, y+7+legFwd,  4, 8, '#f0c8a8');
-
-  // ── SOCKS (blue) + SHOES (black) ──
   pr(x-4, y+13+legBack, 4, 3, '#1565c0');
   pr(x,   y+13+legFwd,  4, 3, '#1565c0');
-  pr(x-5, y+15+legBack, 5, 2, '#111');  // shoe back
-  pr(x-1, y+15+legFwd,  5, 2, '#111');  // shoe front
-
-  // ── JERSEY (blue) ──
+  pr(x-5, y+15+legBack, 5, 2, '#111');
+  pr(x-1, y+15+legFwd,  5, 2, '#111');
   const jerseyC = fl?'#ff5555':'#1976d2';
   pr(x-6, y-5, 12, 8, jerseyC);
-  // jersey collar
   pr(x-2, y-5, 4, 2, '#ffffff');
-  // jersey number "9"
   ctx.fillStyle=fl?'#ffaaaa':'#ffffff';
   ctx.font='bold 5px Courier New'; ctx.textAlign='center';
   ctx.fillText('9', x, y-1);
-
-  // ── ARMS ──
   const armC = fl?'#ff5555':'#1976d2';
-  // back arm
   pr(x-9, y-4+legBack, 3, 7, armC);
-  pr(x-9, y+2+legBack, 3, 2, '#e8b89a'); // forearm skin
-  // front arm
+  pr(x-9, y+2+legBack, 3, 2, '#e8b89a');
   pr(x+6, y-4+legFwd,  3, 7, armC);
   pr(x+6, y+2+legFwd,  3, 2, '#e8b89a');
-
-  // ── HEAD (bigger — 14x14px pixel art) ──
-  // Neck
   pr(x-2, y-8, 4, 4, '#e8b89a');
-  // Head base
   pr(x-7, y-22, 14, 14, '#f5c99a');
-  // Hair (dark brown, covers top 4px)
   pr(x-7, y-22, 14, 5, '#4e342e');
-  // Ear left
   pr(x-8, y-17, 2, 3, '#e0a87a');
-  // Ear right
   pr(x+6, y-17, 2, 3, '#e0a87a');
-  // Eyes — 2 pixels wide each, with white + pupil
   const eyeY = y-16;
-  const eyeLX = d>0 ? x-3 : x-4;  // eye positions shift with direction
+  const eyeLX = d>0 ? x-3 : x-4;
   const eyeRX = d>0 ? x+1 : x;
-  // whites
   pr(eyeLX, eyeY, 3, 3, '#ffffff');
   pr(eyeRX, eyeY, 3, 3, '#ffffff');
-  // pupils (shift toward facing direction)
   pr(eyeLX+d, eyeY+1, 2, 2, '#1a1a1a');
   pr(eyeRX+d, eyeY+1, 2, 2, '#1a1a1a');
-  // eyebrows
   pr(eyeLX, eyeY-2, 3, 1, '#4e342e');
   pr(eyeRX, eyeY-2, 3, 1, '#4e342e');
-  // mouth (small smile)
   pr(x-2, y-10, 2, 1, '#c8805a');
   pr(x,   y-10, 2, 1, '#c8805a');
 
-  // Stun indicator: yellow "ZAP" flicker + stun bar above player
   if(player.stunned>0){
-    // Flicker stun stars
     if(frameCount%4<2){
       const starOff=[[0,-18],[6,-15],[-6,-15]];
       starOff.forEach(([ox,oy])=>{
@@ -5366,30 +5519,299 @@ function drawPlayer(){
         ctx.beginPath();ctx.arc(x+ox,y+oy,2.5,0,Math.PI*2);ctx.fill();
       });
     }
-    // Stun bar
     const sbW=28, sbH=3, sbX=x-sbW/2, sbY=y-22;
     ctx.fillStyle='#222';ctx.fillRect(sbX,sbY,sbW,sbH);
     ctx.fillStyle='#ffeb3b';ctx.fillRect(sbX,sbY,sbW*(player.stunned/40),sbH);
-    // "!" text
     ctx.fillStyle='#ffeb3b';ctx.font='bold 9px Courier New';ctx.textAlign='center';
     ctx.fillText('!',x,y-25);
   }
 
-  // ── Cooldown reload ring around ball (at feet) ──
   if(!ball.active && player.stunned<=0){
     const maxCD2=60, minCD2=10, killB=Math.min(100,Math.floor(totalKills/5)*5);
     const cMax=Math.max(minCD2,maxCD2-killB);
     const progress = 1-(shootCooldown/cMax);
     if(progress<1){
       const ballBounceDraw = Math.abs(Math.sin(ball.bounce))*6;
-    const bfx=x+player.dir*8, bfy=y+player.h/2-ball.r-ballBounceDraw;
+      const bfx=x+player.dir*8, bfy=y+player.h/2-ball.r-ballBounceDraw;
       ctx.strokeStyle='rgba(232,255,0,0.5)';ctx.lineWidth=2;
       ctx.beginPath();ctx.arc(bfx,bfy,ball.r+3,-Math.PI/2,-Math.PI/2+progress*Math.PI*2);ctx.stroke();
     }
   }
 }
 
+// ══════════════════════════════════════
+// VIKING MAN DRAW
+// ══════════════════════════════════════
+function drawVikingPlayer(){
+  const x=Math.round(sx(player.x)), y=Math.round(sy(player.y));
+  const d=player.dir, leg=player.animFrame;
+  const fl=player.hitFlash>0&&frameCount%3<2;
+
+  // ── Idle breathing animation (chest bob when not moving) ──
+  const isMoving = leg !== 0;
+  const breathe = isMoving ? 0 : Math.sin(frameCount * 0.055) * 1.2; // gentle vertical bob
+
+  // ── Shadow ──
+  ctx.fillStyle='rgba(0,0,0,0.22)';
+  ctx.beginPath();ctx.ellipse(x,y+13,10,3,0,0,Math.PI*2);ctx.fill();
+
+  // ── Leg animation offsets (same walk cycle, brown boots) ──
+  const legFwd  = (leg===1)?3:(leg===3)?-3:0;
+  const legBack = (leg===1)?-2:(leg===3)?2:0;
+
+  // ── THROW ANIMATION (kickAnim reused for axe throw) ──
+  if(player.kickAnim>0){
+    let throwPhase;
+    if(player.kickAnim > 6){ throwPhase = Math.min(1, (18-player.kickAnim)/5); }
+    else { throwPhase = player.kickAnim/6; }
+    const d2 = player.dir;
+    // Arm raise: the throwing arm swings forward+up
+    const shoulderX = x + d2*6, shoulderY = y - 4;
+    const armLen = 12;
+    const armAngle = (-Math.PI/4) - throwPhase*(Math.PI*0.6)*d2;
+    const elbowX = Math.round(shoulderX + Math.cos(armAngle)*armLen);
+    const elbowY = Math.round(shoulderY + Math.sin(Math.abs(armAngle))*armLen * (throwPhase));
+    ctx.strokeStyle='#8B4513'; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.moveTo(shoulderX, shoulderY); ctx.lineTo(elbowX, elbowY); ctx.stroke();
+    // Skin forearm
+    ctx.strokeStyle='#d4a870'; ctx.lineWidth=3;
+    const foreLen = 9;
+    const foreAngle = armAngle - throwPhase*(Math.PI*0.3)*d2;
+    const handX = Math.round(elbowX + Math.cos(foreAngle)*foreLen);
+    const handY = Math.round(elbowY + Math.sin(foreAngle)*foreLen);
+    ctx.beginPath(); ctx.moveTo(elbowX, elbowY); ctx.lineTo(handX, handY); ctx.stroke();
+  }
+
+  // ── LEGS (Viking brown skin) ──
+  pr(x-3, y+7+legBack, 4, 8, '#d4a870');
+  pr(x-1, y+7+legFwd,  4, 8, '#dab880');
+  // Boots (dark brown leather)
+  pr(x-4, y+13+legBack, 4, 5, '#5d3a1a');
+  pr(x,   y+13+legFwd,  4, 5, '#5d3a1a');
+  // Boot soles
+  pr(x-5, y+17+legBack, 5, 2, '#3d2210');
+  pr(x-1, y+17+legFwd,  5, 2, '#3d2210');
+  // Boot highlight
+  pr(x-3, y+13+legBack, 1, 3, '#7d5a3a');
+  pr(x+1, y+13+legFwd,  1, 3, '#7d5a3a');
+
+  // ── TUNIC / BELT ──
+  const tunicC = fl?'#cc4411':'#8B4513';
+  pr(x-5, y+2, 10, 6, tunicC);
+  pr(x-5, y+2, 10, 1, '#6B3410');
+  // Belt buckle
+  pr(x-1, y+5, 3, 2, '#aaa');
+  pr(x,   y+6, 1, 1, '#ddd');
+
+  // ── BODY / TORSO (leather tunic) ──
+  pr(x-6, y-5, 12, 8, fl?'#cc4411':'#8B4513');
+  // Metal chest plate
+  pr(x-4, y-4, 8, 5, fl?'#997777':'#7a7a8a');
+  pr(x-3, y-3, 6, 3, fl?'#bb9999':'#9a9aaa');
+  // Chest plate rivets
+  pr(x-3, y-4, 1, 1, '#ccc');
+  pr(x+2, y-4, 1, 1, '#ccc');
+
+  // ── ARMS (tunic sleeves) ──
+  const armC = fl?'#cc4411':'#8B4513';
+  // back arm
+  pr(x-9, y-4+legBack, 3, 7, armC);
+  pr(x-9, y+2+legBack, 3, 3, '#d4a870'); // forearm skin
+  // front arm (throw arm)
+  if(player.kickAnim<=0){
+    pr(x+6, y-4+legFwd,  3, 7, armC);
+    pr(x+6, y+2+legFwd,  3, 3, '#d4a870');
+  }
+
+  // ── NECK + HEAD ──
+  const bOff = Math.round(breathe); // breathing offset
+  pr(x-2, y-8+bOff, 4, 4, '#d4a870'); // neck
+  pr(x-7, y-22+bOff, 14, 14, '#d4a870'); // head base (blonde skin tone)
+
+  // ── BLONDE HAIR (side braids) ──
+  pr(x-7, y-18+bOff, 2, 8, '#c8a000'); // left braid
+  pr(x+5, y-18+bOff, 2, 8, '#c8a000'); // right braid
+  // Braid detail
+  pr(x-7, y-16+bOff, 2, 1, '#e8c000');
+  pr(x-7, y-13+bOff, 2, 1, '#e8c000');
+  pr(x+5, y-16+bOff, 2, 1, '#e8c000');
+  pr(x+5, y-13+bOff, 2, 1, '#e8c000');
+
+  // ── BLONDE BEARD ──
+  pr(x-5, y-11+bOff, 10, 4, '#c8a000');
+  pr(x-4, y-8+bOff,  8, 4, '#b89000');
+  pr(x-3, y-5+bOff,  6, 2, '#a07800');
+  // Beard highlight
+  pr(x-3, y-11+bOff, 2, 2, '#e8d060');
+
+  // ── EARS ──
+  pr(x-8, y-17+bOff, 2, 3, '#c8945a');
+  pr(x+6, y-17+bOff, 2, 3, '#c8945a');
+
+  // ── EYES (blue, viking) ──
+  const eyeY = y-16+bOff;
+  const eyeLX = d>0 ? x-3 : x-4;
+  const eyeRX = d>0 ? x+1 : x;
+  pr(eyeLX, eyeY, 3, 3, '#ffffff');
+  pr(eyeRX, eyeY, 3, 3, '#ffffff');
+  pr(eyeLX+d, eyeY+1, 2, 2, '#1a5fa0'); // blue pupils
+  pr(eyeRX+d, eyeY+1, 2, 2, '#1a5fa0');
+  pr(eyeLX, eyeY-2, 3, 1, '#a07000'); // blonde eyebrows
+  pr(eyeRX, eyeY-2, 3, 1, '#a07000');
+
+  // ── VIKING HELMET (iron) ──
+  const helmY = y-27+bOff;
+  pr(x-7, helmY+5, 14, 6, '#888'); // helm base
+  pr(x-7, helmY+3, 14, 3, '#999'); // dome
+  pr(x-5, helmY+1, 10, 3, '#aaa'); // dome top
+  pr(x-3, helmY,   6,  2, '#bbb'); // highlight
+  // Nose guard
+  pr(x-1, helmY+7, 2, 5, '#777');
+  // Horns!
+  pr(x-9, helmY+4, 3, 2, '#999'); // left horn base
+  pr(x-11,helmY+1, 2, 4, '#aaa'); // left horn mid
+  pr(x-12,helmY-2, 2, 4, '#bbb'); // left horn tip
+  pr(x+7, helmY+4, 3, 2, '#999'); // right horn base
+  pr(x+10,helmY+1, 2, 4, '#aaa'); // right horn mid
+  pr(x+11,helmY-2, 2, 4, '#bbb'); // right horn tip
+  // Helm shine
+  pr(x-4, helmY+2, 4, 1, '#ddd');
+
+
+
+  // ── STUN indicator ──
+  if(player.stunned>0){
+    if(frameCount%4<2){
+      const starOff=[[0,-28],[6,-24],[-6,-24]];
+      starOff.forEach(([ox,oy])=>{
+        ctx.fillStyle='#ffeb3b';
+        ctx.beginPath();ctx.arc(x+ox,y+oy+bOff,2.5,0,Math.PI*2);ctx.fill();
+      });
+    }
+    const sbW=28, sbH=3, sbX=x-sbW/2, sbY=y-30+bOff;
+    ctx.fillStyle='#222';ctx.fillRect(sbX,sbY,sbW,sbH);
+    ctx.fillStyle='#ffeb3b';ctx.fillRect(sbX,sbY,sbW*(player.stunned/40),sbH);
+    ctx.fillStyle='#ffeb3b';ctx.font='bold 9px Courier New';ctx.textAlign='center';
+    ctx.fillText('!',x,y-33+bOff);
+  }
+
+  // ── Cooldown ring around axe ──
+  if(!ball.active && player.stunned<=0){
+    const maxCD2=60, minCD2=10, killB=Math.min(100,Math.floor(totalKills/5)*5);
+    const cMax=Math.max(minCD2,maxCD2-killB);
+    const progress = 1-(shootCooldown/cMax);
+    if(progress<1){
+      const hx2 = Math.round(sx(player.x)) + player.dir*14;
+      const hy2 = Math.round(sy(player.y)) - 2;
+      ctx.strokeStyle='rgba(200,168,0,0.6)';ctx.lineWidth=2;
+      ctx.beginPath();ctx.arc(hx2,hy2,9,-Math.PI/2,-Math.PI/2+progress*Math.PI*2);ctx.stroke();
+    }
+  }
+}
+
 function drawBall(){
+  if(selectedChar === 1){ drawHatchet(); return; }
+  drawSoccerBall();
+}
+
+function drawHatchet(){
+  // Double-bladed battle axe — symmetric blades on both sides of the handle
+  const ballArc = ball.active ? Math.round(ball.z) : 0;
+  const bx = Math.round(sx(ball.x));
+  const by = Math.round(sy(ball.y)) - ballArc;
+
+  // Shadow
+  const shadowScale = Math.max(0.2, 1 - ballArc/30);
+  ctx.fillStyle='rgba(0,0,0,'+(0.28*shadowScale)+')';
+  ctx.beginPath();
+  ctx.ellipse(bx, by+ballArc+6, 10*shadowScale, 3*shadowScale, 0,0,Math.PI*2);
+  ctx.fill();
+
+  // Motion trail when flying
+  if(ball.active){
+    for(let i=1;i<=4;i++){
+      ctx.save();
+      ctx.globalAlpha = 0.09 - i*0.018;
+      ctx.translate(bx - ball.vx*i*0.5, by - ball.vy*i*0.5);
+      ctx.rotate(ball.spin - i*0.45);
+      _drawDoubleAxeShape('#aaaaaa','#888888','#6B3A20');
+      ctx.restore();
+    }
+  }
+
+  // Axe itself
+  ctx.save();
+  ctx.translate(bx, by);
+  ctx.rotate(ball.active ? ball.spin : (player.dir * 0.3));
+
+  if(fx.iceBall && fx.iceBall.active){
+    ctx.shadowColor='#aaeeff'; ctx.shadowBlur=14;
+    _drawDoubleAxeShape('#7ac8ee','#aaddff','#4a90c0');
+  } else if(fx.fireBall && fx.fireBall.active){
+    ctx.shadowColor='#ff6600'; ctx.shadowBlur=16;
+    _drawDoubleAxeShape('#cc3300','#ff7700','#7a2200');
+  } else {
+    _drawDoubleAxeShape('#888','#bbb','#6B3A20');
+  }
+  ctx.restore();
+}
+
+// Helper: draw a symmetric double-bladed axe centered at (0,0)
+// blade1 = dark blade color, blade2 = highlight, handleC = handle color
+function _drawDoubleAxeShape(blade1, blade2, handleC){
+  // ── HANDLE (vertical, centered) ──
+  ctx.fillStyle = handleC;
+  ctx.fillRect(-2, -8, 4, 22);            // main shaft
+  ctx.fillStyle = _lighten(handleC, 40);
+  ctx.fillRect(-2, -8, 2, 20);            // left highlight on shaft
+
+  // ── Handle wraps (leather strips) ──
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  [2, 6, 10].forEach(y => ctx.fillRect(-2, y, 4, 1));
+
+  // ── LEFT BLADE (top of handle, pointing left) ──
+  ctx.fillStyle = blade1;
+  ctx.fillRect(-12, -14, 10,  5);  // top lobe
+  ctx.fillRect(-11, -11, 9,   6);  // body
+  ctx.fillRect( -9,  -7, 7,   3);  // lower taper
+  // cutting edge highlight
+  ctx.fillStyle = blade2;
+  ctx.fillRect(-12, -13, 2,   4);  // left edge gleam
+  ctx.fillRect(-11, -11, 2,   4);  // shimmer
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fillRect(-12, -14, 1,   2);  // top gleam
+
+  // ── RIGHT BLADE (top of handle, pointing right) ──
+  ctx.fillStyle = blade1;
+  ctx.fillRect(  2, -14, 10,  5);
+  ctx.fillRect(  2, -11,  9,  6);
+  ctx.fillRect(  2,  -7,  7,  3);
+  ctx.fillStyle = blade2;
+  ctx.fillRect( 10, -13,  2,  4);
+  ctx.fillRect(  9, -11,  2,  4);
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fillRect( 11, -14,  1,  2);
+
+  // ── CENTRE COLLAR (where blades clamp onto handle) ──
+  ctx.fillStyle = _lighten(blade1, 20);
+  ctx.fillRect(-2, -10, 4, 6);
+
+  // ── Eye holes on each blade (decorative) ──
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(-9, -12, 3, 2);   // left blade hole
+  ctx.fillRect( 6, -12, 3, 2);   // right blade hole
+}
+
+// Simple color lightening helper (hex → hex, offset in 0-255)
+function _lighten(hex, amt){
+  const n = parseInt(hex.replace('#',''),16);
+  const r = Math.min(255, (n>>16)+amt);
+  const g = Math.min(255, ((n>>8)&0xff)+amt);
+  const b = Math.min(255, (n&0xff)+amt);
+  return '#'+(r<<16|g<<8|b).toString(16).padStart(6,'0');
+}
+
+function drawSoccerBall(){
   const ballArc = ball.active ? Math.round(ball.z) : 0; // height offset (px up)
   const bx = Math.round(sx(ball.x));
   const by = Math.round(sy(ball.y)) - ballArc; // ball drawn higher when arcing
@@ -5415,12 +5837,10 @@ function drawBall(){
   // Ball itself
   ctx.save();ctx.translate(bx,by);ctx.rotate(ball.spin);
   if(fx.iceBall.active){
-    // Icy blue-white ball
     ctx.shadowColor='#aaeeff'; ctx.shadowBlur=14;
     ctx.fillStyle='#ddf6ff';ctx.beginPath();ctx.arc(0,0,ball.r,0,Math.PI*2);ctx.fill();
     ctx.fillStyle='rgba(100,200,255,0.7)';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
     [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='rgba(150,220,255,0.9)';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
-    // Crystal sparkle
     ctx.fillStyle='rgba(255,255,255,0.9)';
     ctx.fillRect(-1,-ball.r+2,2,3); ctx.fillRect(-ball.r+2,-1,3,2);
   } else {
@@ -6077,7 +6497,8 @@ function drawPowerups(){
     const blinkPhase = pu.life < 180;
     if(blinkPhase && Math.floor(t/7)%2===0) continue;
     const sz=22, half=sz/2;
-    const glow=pu.def.glow, col=pu.def.color;
+    const def = getPuDef(pu.def);
+    const glow=def.glow, col=def.color;
     ctx.save();
     const pulse=0.7+0.3*Math.sin(t*0.12);
     for(let layer=4;layer>0;layer--){
@@ -6096,15 +6517,39 @@ function drawPowerups(){
     ctx.fillRect(px2-half,py2-half,sz,sz);
     ctx.font='16px Courier New'; ctx.textAlign='center';
     ctx.globalAlpha=1;
-    if(pu.def.icon==='GUN'){
+    if(def.icon==='GUN'){
       drawPixelShotgun(px2, py2, 1);
+    } else if(def.icon==='AXE'){
+      drawPixelAxeIcon(px2, py2);
     } else {
-      ctx.fillText(pu.def.icon, px2, py2+6);
+      ctx.fillText(def.icon, px2, py2+6);
     }
     ctx.fillStyle='#ffffff'; ctx.font='bold 7px Courier New';
-    ctx.fillText(pu.def.label, px2, py2+half+9);
+    ctx.fillText(def.label, px2, py2+half+9);
     ctx.restore();
   }
+}
+
+// Draw a mini double-bladed axe icon inside a powerup tile (centered at cx,cy)
+function drawPixelAxeIcon(cx, cy){
+  ctx.save();
+  ctx.translate(cx, cy);
+  // Handle
+  ctx.fillStyle='#6B3A20'; ctx.fillRect(-1,-7,2,14);
+  ctx.fillStyle='#9d6a40'; ctx.fillRect(-1,-7,1,12);
+  // Left blade
+  ctx.fillStyle='#aaa';
+  ctx.fillRect(-8,-9,6,3); ctx.fillRect(-7,-7,6,4); ctx.fillRect(-6,-4,4,2);
+  ctx.fillStyle='#ddd'; ctx.fillRect(-8,-9,1,3); ctx.fillRect(-7,-7,1,3);
+  ctx.fillStyle='rgba(255,255,255,0.7)'; ctx.fillRect(-8,-9,1,1);
+  // Right blade
+  ctx.fillStyle='#aaa';
+  ctx.fillRect( 2,-9,6,3); ctx.fillRect( 1,-7,6,4); ctx.fillRect( 2,-4,4,2);
+  ctx.fillStyle='#ddd'; ctx.fillRect( 7,-9,1,3); ctx.fillRect( 6,-7,1,3);
+  ctx.fillStyle='rgba(255,255,255,0.7)'; ctx.fillRect( 7,-9,1,1);
+  // Collar
+  ctx.fillStyle='#bbb'; ctx.fillRect(-1,-8,2,4);
+  ctx.restore();
 }
 
 // ── Draw thunderbolts — blue bolt top→ground, stops at impact, shockwave ──
@@ -6215,8 +6660,8 @@ function drawActiveFX(){
   if(fx.fireBall.active)   fxList.push({icon:'🔥',color:'#ff6d00',timer:fx.fireBall.timer,max:fx.fireBall.max});
   if(fx.iceBall.active)    fxList.push({icon:'🧊',color:'#00cfff',timer:fx.iceBall.timer,max:fx.iceBall.max});
   if(ricochetCount>0)      fxList.push({icon:'↩️',color:'#00e5ff',timer:ricochetTimer,max:1800,extra:'×'+ricochetCount});
-  if(extraBalls.length>0)  {} // +1 ball powerup: permanent, no gauge shown
-  if(orbitBalls.length>0)  fxList.push({icon:'⚽',color:'#ffe066',timer:orbitBallsTimer,max:1200,extra:'×6 ORBIT'});
+  if(extraBalls.length>0)  {} // +1 ball/axe powerup: permanent, no gauge shown
+  if(orbitBalls.length>0)  fxList.push({icon: selectedChar===1?'⚔️':'⚽', color:'#ffe066', timer:orbitBallsTimer, max:1200, extra: selectedChar===1?'×6 AXES':'×6 ORBIT'});
   if(fx.thunder.active)    fxList.push({icon:'⚡',color:'#1565c0',timer:fx.thunder.timer,max:fx.thunder.max});
   if(fx.slowMo.active)     fxList.push({icon:'🐌',color:'#e040fb',timer:fx.slowMo.timer,max:fx.slowMo.max});
   if(fx.shotgun.active)    fxList.push({icon:'💥',color:'#ff5722',timer:fx.shotgun.timer,max:fx.shotgun.max,extra:fx.shotgun.reloading>0?'RELOAD':('×'+fx.shotgun.shots)});
@@ -6372,36 +6817,67 @@ function drawBallFire(){
   ctx.restore();
 }
 
-// ── Draw extra balls (identical to main ball) ──
+// ── Draw extra balls (or hatchets for Viking) ──
 function drawBall2(){
   for(const eb of extraBalls){
     const bArc=eb.active?Math.round(eb.z):0;
     const bx=Math.round(sx(eb.x)), by=Math.round(sy(eb.y))-bArc;
-    // Shadow
-    const shadowScale=Math.max(0.2,1-bArc/30);
-    ctx.fillStyle='rgba(0,0,0,'+(0.35*shadowScale)+')';
-    ctx.beginPath();ctx.ellipse(bx,by+bArc+eb.r,eb.r*1.1*shadowScale,eb.r*0.4*shadowScale,0,0,Math.PI*2);ctx.fill();
-    // Motion trail
-    if(eb.active){
-      for(let i=1;i<=4;i++){
-        ctx.fillStyle='rgba(255,255,255,'+(0.09-i*0.018)+')';
-        ctx.beginPath();ctx.arc(bx-eb.vx*i*0.5,by-eb.vy*i*0.5,eb.r*(1-i*0.2),0,Math.PI*2);ctx.fill();
+
+    if(selectedChar === 1){
+      // Viking: draw mini hatchet
+      const shadowScale=Math.max(0.2,1-bArc/30);
+      ctx.fillStyle='rgba(0,0,0,'+(0.28*shadowScale)+')';
+      ctx.beginPath();
+      ctx.ellipse(bx, by+bArc+6, 10*shadowScale, 3*shadowScale, 0,0,Math.PI*2);
+      ctx.fill();
+      if(eb.active){
+        for(let i=1;i<=4;i++){
+          ctx.save();
+          ctx.globalAlpha = 0.09 - i*0.018;
+          ctx.translate(bx - eb.vx*i*0.5, by - eb.vy*i*0.5);
+          ctx.rotate(eb.spin - i*0.45);
+          _drawDoubleAxeShape('#aaaaaa','#888888','#6B3A20');
+          ctx.restore();
+        }
       }
-    }
-    // Ball itself — identical design to main ball
-    ctx.save();ctx.translate(bx,by);ctx.rotate(eb.spin);
-    if(fx.iceBall.active){
-      ctx.shadowColor='#aaeeff'; ctx.shadowBlur=14;
-      ctx.fillStyle='#ddf6ff';ctx.beginPath();ctx.arc(0,0,eb.r,0,Math.PI*2);ctx.fill();
-      ctx.fillStyle='rgba(100,200,255,0.7)';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
-      [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='rgba(150,220,255,0.9)';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
-      ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fillRect(-1,-eb.r+2,2,3); ctx.fillRect(-eb.r+2,-1,3,2);
+      ctx.save();
+      ctx.translate(bx, by);
+      ctx.rotate(eb.active ? eb.spin : (player.dir * 0.3));
+      if(fx.iceBall && fx.iceBall.active){
+        ctx.shadowColor='#aaeeff'; ctx.shadowBlur=14;
+        _drawDoubleAxeShape('#7ac8ee','#aaddff','#4a90c0');
+      } else if(fx.fireBall && fx.fireBall.active){
+        ctx.shadowColor='#ff6600'; ctx.shadowBlur=16;
+        _drawDoubleAxeShape('#cc3300','#ff7700','#7a2200');
+      } else {
+        _drawDoubleAxeShape('#888','#bbb','#6B3A20');
+      }
+      ctx.restore();
     } else {
-      ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(0,0,eb.r,0,Math.PI*2);ctx.fill();
-      ctx.fillStyle='#1a1a1a';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
-      [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='#333';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+      // Soccer ball
+      const shadowScale=Math.max(0.2,1-bArc/30);
+      ctx.fillStyle='rgba(0,0,0,'+(0.35*shadowScale)+')';
+      ctx.beginPath();ctx.ellipse(bx,by+bArc+eb.r,eb.r*1.1*shadowScale,eb.r*0.4*shadowScale,0,0,Math.PI*2);ctx.fill();
+      if(eb.active){
+        for(let i=1;i<=4;i++){
+          ctx.fillStyle='rgba(255,255,255,'+(0.09-i*0.018)+')';
+          ctx.beginPath();ctx.arc(bx-eb.vx*i*0.5,by-eb.vy*i*0.5,eb.r*(1-i*0.2),0,Math.PI*2);ctx.fill();
+        }
+      }
+      ctx.save();ctx.translate(bx,by);ctx.rotate(eb.spin);
+      if(fx.iceBall.active){
+        ctx.shadowColor='#aaeeff'; ctx.shadowBlur=14;
+        ctx.fillStyle='#ddf6ff';ctx.beginPath();ctx.arc(0,0,eb.r,0,Math.PI*2);ctx.fill();
+        ctx.fillStyle='rgba(100,200,255,0.7)';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
+        [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='rgba(150,220,255,0.9)';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+        ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fillRect(-1,-eb.r+2,2,3); ctx.fillRect(-eb.r+2,-1,3,2);
+      } else {
+        ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(0,0,eb.r,0,Math.PI*2);ctx.fill();
+        ctx.fillStyle='#1a1a1a';ctx.beginPath();ctx.arc(0,0,2.8,0,Math.PI*2);ctx.fill();
+        [[0,-5],[4,3],[-4,3]].forEach(([a,b])=>{ctx.fillStyle='#333';ctx.beginPath();ctx.arc(a,b,1.8,0,Math.PI*2);ctx.fill();});
+      }
+      ctx.restore();
     }
-    ctx.restore();
     // Fire aura on extra ball if fireball active
     if(fx.fireBall.active){
       ctx.save();
@@ -6887,23 +7363,39 @@ const panelStartY = topY + 50;
   ctx.fillText(score, panelX + 4, baseY);
   ctx.shadowBlur=0;
 
-  // ── BALL COUNT — juste au-dessus du score ──
+  // ── BALL / AXE COUNT — juste au-dessus du score ──
   {
-    const totalBalls = 1 + extraBalls.length; // ballon principal + extra balls
+    const totalBalls = 1 + extraBalls.length;
     const ballsAtFeet = (ball.active ? 0 : 1) + extraBalls.filter(eb => !eb.active).length;
     const bx = panelX + 4;
     const by = VH - 80;
     ctx.save();
     ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 8;
-    // Icône ⚽ grande
-    ctx.font = 'bold 28px Courier New';
-    ctx.fillStyle = '#e8ff00';
-    ctx.textAlign = 'left';
-    ctx.fillText('⚽', bx, by);
-    // Chiffre de balles disponibles / total
-    ctx.font = 'bold 26px Courier New';
-    ctx.fillStyle = ballsAtFeet > 0 ? '#ffffff' : '#666666';
-    ctx.fillText(ballsAtFeet + '/' + totalBalls, bx + 34, by);
+    if(selectedChar === 1){
+      // Viking: draw mini axe icon instead of ⚽
+      ctx.save();
+      ctx.translate(bx + 14, by - 8);
+      ctx.fillStyle='#6B3A20'; ctx.fillRect(-1,-7,2,14);
+      ctx.fillStyle='#aaa';
+      ctx.fillRect(-7,-9,5,3); ctx.fillRect(-6,-7,5,4);
+      ctx.fillRect( 2,-9,5,3); ctx.fillRect( 1,-7,5,4);
+      ctx.fillStyle='#ddd';
+      ctx.fillRect(-7,-9,1,3); ctx.fillRect( 6,-9,1,3);
+      ctx.fillStyle='#bbb'; ctx.fillRect(-1,-8,2,4);
+      ctx.restore();
+      ctx.font = 'bold 26px Courier New';
+      ctx.fillStyle = ballsAtFeet > 0 ? '#e8c860' : '#666666';
+      ctx.textAlign = 'left';
+      ctx.fillText(ballsAtFeet + '/' + totalBalls, bx + 34, by);
+    } else {
+      ctx.font = 'bold 28px Courier New';
+      ctx.fillStyle = '#e8ff00';
+      ctx.textAlign = 'left';
+      ctx.fillText('⚽', bx, by);
+      ctx.font = 'bold 26px Courier New';
+      ctx.fillStyle = ballsAtFeet > 0 ? '#ffffff' : '#666666';
+      ctx.fillText(ballsAtFeet + '/' + totalBalls, bx + 34, by);
+    }
     ctx.restore();
   }
 
@@ -7203,16 +7695,16 @@ function togglePause(){
 }
 
 function goToHome(){
-  // Arrêt de la boucle de jeu
   if(loopId){ cancelAnimationFrame(loopId); loopId=null; }
   isPaused = false;
   gameOver = false;
-  // Afficher l'écran d'accueil
   const overlay = document.getElementById('overlay');
   const finalScore = document.getElementById('final-score');
   finalScore.style.display = 'none';
   document.getElementById('startBtn').textContent = 'PLAY';
   overlay.style.display = 'flex';
+  // Redraw character previews (canvas may have been cleared)
+  setTimeout(()=>{ drawCharPreviews(); charSlide(0); }, 80);
 }
 function drawTargetArrow(){
   if(!currentTarget || currentTarget.dead) return;
@@ -7399,6 +7891,7 @@ function loop(timestamp){
       fs.textContent='Score: '+score+' — Wave '+wave+' — '+totalKills+' zombies killed';
       document.getElementById('startBtn').textContent='PLAY AGAIN';
       document.getElementById('overlay').style.display='flex';
+      setTimeout(()=>drawCharPreviews(), 50);
     },1800);
   }
 }
@@ -7408,6 +7901,7 @@ window.addEventListener('load', () => {
   resize();
   setTimeout(resize, 100);
   setTimeout(resize, 300);
+  setTimeout(()=>drawCharPreviews(), 200);
 });
 </script>
 </body>
