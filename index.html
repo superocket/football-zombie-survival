@@ -7812,6 +7812,17 @@ const panelStartY = topY + 50;
       ctx.fillStyle = ballsAtFeet > 0 ? '#e8c860' : '#666666';
       ctx.textAlign = 'left';
       ctx.fillText(ballsAtFeet + '/' + totalBalls, bx + 34, by);
+    } else if(selectedChar === 2){
+      // Grand Ma: draw mini flip flop icon
+      ctx.save();
+      ctx.translate(bx + 14, by - 8);
+      ctx.globalAlpha = ballsAtFeet > 0 ? 1 : 0.4;
+      drawPixelFlipFlopIcon(0, 0);
+      ctx.restore();
+      ctx.font = 'bold 26px Courier New';
+      ctx.fillStyle = ballsAtFeet > 0 ? '#ff69b4' : '#666666';
+      ctx.textAlign = 'left';
+      ctx.fillText(ballsAtFeet + '/' + totalBalls, bx + 34, by);
     } else {
       ctx.font = 'bold 28px Courier New';
       ctx.fillStyle = '#e8ff00';
