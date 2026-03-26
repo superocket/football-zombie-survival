@@ -61,11 +61,29 @@ canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges; 
   <div class="score-display" id="final-score" style="display:none"></div>
 
   <!-- Character Selection Slider -->
-  <div id="char-select" style="width:100%;max-width:340px;margin-bottom:18px;">
-    <div style="color:#aaa;font-size:10px;letter-spacing:2px;text-align:center;margin-bottom:10px;text-transform:uppercase;">Choose your fighter</div>
-    <div style="display:flex;align-items:center;justify-content:center;gap:8px;user-select:none;">
-      <button id="char-prev" onclick="charSlide(-1)" style="background:none;border:2px solid #e8ff00;color:#e8ff00;font-size:20px;width:32px;height:48px;cursor:pointer;clip-path:polygon(0 50%,100% 0,100% 100%);padding:0;flex-shrink:0;">&#8249;</button>
-      <div id="char-cards-viewport" style="overflow:hidden;width:220px;flex-shrink:0;">
+  <div id="char-select" style="width:100%;max-width:380px;margin-bottom:18px;">
+    <div style="color:#ffffff;font-size:16px;font-weight:bold;letter-spacing:4px;text-align:center;margin-bottom:12px;text-transform:uppercase;text-shadow:0 0 12px rgba(255,255,255,0.4);">Choose your fighter</div>
+    <div style="display:flex;align-items:center;justify-content:center;gap:0;user-select:none;position:relative;overflow:hidden;">
+
+      <!-- Left arrow — big -->
+      <button id="char-prev" onclick="charSlide(-1)" style="
+        background:none;border:none;color:#e8ff00;
+        font-size:52px;line-height:1;
+        width:54px;height:90px;
+        cursor:pointer;padding:0;flex-shrink:0;
+        display:flex;align-items:center;justify-content:center;
+        text-shadow:0 0 18px #e8ff00,0 0 6px #e8ff00;
+        transition:transform 0.12s,text-shadow 0.12s;
+        position:relative;z-index:2;
+      " onmouseenter="this.style.transform='scale(1.18)'" onmouseleave="this.style.style=''" ontouchstart="this.style.transform='scale(1.18)'" ontouchend="this.style.transform='scale(1)'">&#10094;</button>
+
+      <!-- Viewport with peek on both sides -->
+      <div id="char-cards-viewport" style="overflow:visible;width:220px;flex-shrink:0;position:relative;">
+        <!-- Peek fade left -->
+        <div id="peek-fade-left" style="position:absolute;left:0;top:0;bottom:0;width:28px;background:linear-gradient(to right,rgba(0,0,0,0.72),transparent);z-index:3;pointer-events:none;"></div>
+        <!-- Peek fade right -->
+        <div id="peek-fade-right" style="position:absolute;right:0;top:0;bottom:0;width:28px;background:linear-gradient(to left,rgba(0,0,0,0.72),transparent);z-index:3;pointer-events:none;"></div>
+
         <div id="char-cards-track" style="display:flex;transition:transform 0.32s cubic-bezier(.4,0,.2,1);">
           <!-- Card 0: Soccer Man -->
           <div class="char-card" style="min-width:220px;box-sizing:border-box;padding:14px 18px;background:rgba(232,255,0,0.07);border:2px solid #e8ff00;text-align:center;">
@@ -81,8 +99,20 @@ canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges; 
           </div>
         </div>
       </div>
-      <button id="char-next" onclick="charSlide(1)" style="background:none;border:2px solid #e8ff00;color:#e8ff00;font-size:20px;width:32px;height:48px;cursor:pointer;clip-path:polygon(0 0,100% 50%,0 100%);padding:0;flex-shrink:0;">&#8250;</button>
+
+      <!-- Right arrow — big -->
+      <button id="char-next" onclick="charSlide(1)" style="
+        background:none;border:none;color:#e8ff00;
+        font-size:52px;line-height:1;
+        width:54px;height:90px;
+        cursor:pointer;padding:0;flex-shrink:0;
+        display:flex;align-items:center;justify-content:center;
+        text-shadow:0 0 18px #e8ff00,0 0 6px #e8ff00;
+        transition:transform 0.12s,text-shadow 0.12s;
+        position:relative;z-index:2;
+      " onmouseenter="this.style.transform='scale(1.18)'" onmouseleave="this.style.transform='scale(1)'" ontouchstart="this.style.transform='scale(1.18)'" ontouchend="this.style.transform='scale(1)'">&#10095;</button>
     </div>
+
     <!-- Dots -->
     <div style="display:flex;justify-content:center;gap:8px;margin-top:10px;">
       <div class="char-dot active-dot" id="dot-0" onclick="charSlide(0-charIdx)" style="width:8px;height:8px;border-radius:50%;background:#e8ff00;cursor:pointer;transition:background 0.2s;"></div>
@@ -108,12 +138,43 @@ function charSlide(delta){
   const n = 2; // number of characters
   charIdx = Math.max(0, Math.min(n-1, charIdx + delta));
   selectedChar = charIdx;
+
+  // Move the track
   document.getElementById('char-cards-track').style.transform = `translateX(-${charIdx * 220}px)`;
+
+  // Peek effect: show adjacent card slightly dimmed
+  const cards = document.querySelectorAll('.char-card');
+  cards.forEach((card, i) => {
+    if(i === charIdx){
+      card.style.opacity = '1';
+      card.style.transform = 'scale(1)';
+      card.style.filter = 'none';
+    } else {
+      card.style.opacity = '0.38';
+      card.style.transform = 'scale(0.88)';
+      card.style.filter = 'brightness(0.6)';
+    }
+    card.style.transition = 'opacity 0.32s, transform 0.32s, filter 0.32s';
+  });
+
+  // Fade overlays: hide left fade on first card, hide right fade on last card
+  const fadeL = document.getElementById('peek-fade-left');
+  const fadeR = document.getElementById('peek-fade-right');
+  if(fadeL) fadeL.style.opacity = charIdx === 0 ? '0' : '1';
+  if(fadeR) fadeR.style.opacity = charIdx === n-1 ? '0' : '1';
+
+  // Arrow visibility
+  const prev = document.getElementById('char-prev');
+  const next = document.getElementById('char-next');
+  if(prev) prev.style.opacity = charIdx === 0 ? '0.25' : '1';
+  if(next) next.style.opacity = charIdx === n-1 ? '0.25' : '1';
+
   // Update dots
   for(let i=0;i<n;i++){
     const dot = document.getElementById('dot-'+i);
     if(dot){ dot.style.background = i===charIdx ? '#e8ff00' : '#444'; }
   }
+
   // Update instruction text
   const instr = document.getElementById('char-instructions');
   if(instr){
@@ -139,6 +200,8 @@ document.addEventListener('DOMContentLoaded', ()=>{
   }
   // Draw character previews
   drawCharPreviews();
+  // Init peek states
+  charSlide(0);
 });
 
 function drawCharPreviews(){
@@ -7661,7 +7724,7 @@ function drawPauseScreen(anim){
   withAnim(0.32, 0.55, easeOut, t => {
     const offX = (1-t) * VW * 0.5;
     ctx.save(); ctx.translate(offX, 0);
-    drawCheckbox(cbX, cbY2, autoKick, '#e8ff00', 'AUTO KICK', autoKick ? null : 'SPACE / TAP to kick');
+    drawCheckbox(cbX, cbY2, autoKick, '#e8ff00', 'AUTO SHOOT', autoKick ? null : 'SPACE / TAP to shoot');
     ctx.restore();
   });
 }
